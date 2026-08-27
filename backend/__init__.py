@@ -1,0 +1,1 @@
+"""SyncMate FastAPI backend package."""
