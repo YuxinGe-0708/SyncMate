@@ -27,6 +27,22 @@
 2. 双击 `start-frontend.cmd`，保持窗口运行。
 3. 浏览器打开 http://localhost:5173/ 。
 
+### 局域网访问
+
+启动脚本会监听本机所有网卡。请在运行项目的电脑上执行 `ipconfig`，将无线网卡或有线网卡的 IPv4 地址分享给同一局域网中的用户，访问：
+
+```text
+http://<本机局域网IPv4>:5173/
+```
+
+例如本机地址为 `10.135.49.112` 时，访问地址为 `http://10.135.49.112:5173/`。防火墙需要允许 TCP 入站端口 `5173`（前端）和 `8000`（后端仅供本机代理使用）。
+
+如果重新打开终端启动并需要 AI 分账，请先在该 PowerShell 会话中设置 `DASHSCOPE_API_KEY`，再运行 `start-backend.cmd`；密钥只会传给当前运行进程。若 Windows 防火墙拦截局域网访问，请以管理员身份执行：
+
+```powershell
+netsh advfirewall firewall add rule name="SyncMate Frontend 5173" dir=in action=allow protocol=TCP localport=5173 profile=any
+```
+
 演示账号：`demo`，密码：`123456`。
 
 也可以在两个终端中手动运行：
@@ -42,3 +58,15 @@ npm.cmd run dev
 ```
 
 数据库文件位于 `backend/syncmate.db`，首次启动后端时自动创建并初始化演示数据。
+
+## AI 分账配置
+
+AI 分账使用 Qwen Vision。启动后端前请在当前 PowerShell 会话中设置环境变量（不要把密钥写进代码或提交到仓库）：
+
+```powershell
+$env:DASHSCOPE_API_KEY = "你的 DashScope API Key"
+$env:QWEN_BASE_URL = "https://你的工作空间.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+$env:SYNCMATE_QWEN_MODEL = "qwen3-vl-plus"
+```
+
+然后运行 `start-backend.cmd`。如果未配置密钥，AI 分账接口会返回明确的配置错误，不会伪造分账结果。
