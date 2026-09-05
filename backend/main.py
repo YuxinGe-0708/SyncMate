@@ -330,6 +330,11 @@ def initials(nickname: str) -> str:
     return nickname[-2:]
 
 
+def bearer_token(authorization: str) -> str:
+    prefix = "Bearer "
+    return authorization[len(prefix):].strip() if authorization.startswith(prefix) else authorization.strip()
+
+
 def user_json(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -1088,7 +1093,7 @@ def ensure_demo_showcase_data(connection: sqlite3.Connection, owner_id: int) -> 
 def current_user(authorization: str | None = Header(default=None)) -> sqlite3.Row:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="请先登录")
-    token = authorization.removeprefix("Bearer ").strip()
+    token = bearer_token(authorization)
     with db() as connection:
         row = connection.execute(
             """
@@ -1258,7 +1263,7 @@ def login(body: AuthBody) -> dict:
 def logout(authorization: str | None = Header(default=None)) -> dict:
     if authorization and authorization.startswith("Bearer "):
         with db() as connection:
-            connection.execute("DELETE FROM sessions WHERE token = ?", (authorization.removeprefix("Bearer ").strip(),))
+            connection.execute("DELETE FROM sessions WHERE token = ?", (bearer_token(authorization),))
     return {"ok": True}
 
 
