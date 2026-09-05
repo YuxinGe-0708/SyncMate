@@ -12,6 +12,7 @@
 - SQLite 数据持久化与带盐密码哈希
 - 消费热力与财务分析：群组/分类热力、商户排行、月度区域环比
 - AI 小票按商户拆分记录，支持从已有地图搜索或地图点选补充消费地点
+- 仓库内置 `skills/receipt-splitter` Skill：Qwen Vision 识别、自然语言规则解析、金额校验和最小现金流计算
 - 创建、编辑、退出和解散群组
 - 宿舍、合租、旅行、聚餐群组模板
 - 邀请码、邀请链接和二维码加入
@@ -109,7 +110,7 @@ $env:SYNCMATE_QWEN_MODEL = "qwen3-vl-plus"
 
 ## 腾讯云生产部署
 
-生产环境由 Nginx 提供前端和 `/api` 反向代理，FastAPI 由 systemd 开机自启，数据库使用 `/opt/syncmate/data/syncmate.db`。部署配置模板位于 `deploy/`；服务器密钥只写入 `/etc/syncmate.env`，不要提交到 GitHub。
+生产环境由 Nginx 提供前端和 `/api` 反向代理，FastAPI 由 systemd 开机自启，数据库使用 `/opt/syncmate/data/syncmate.db`。部署配置模板位于 `deploy/`；服务器密钥只写入 `/etc/syncmate.env`，不要提交到 GitHub。AI Skill 已随仓库发布，默认路径为 `/opt/syncmate-app/skills/receipt-splitter/scripts/receipt_splitter.py`。
 
 - 访问地址：`http://43.143.228.182/`
 - 后端检查：`curl http://127.0.0.1:8000/api/health`

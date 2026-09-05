@@ -1,0 +1,7 @@
+interface:
+  display_name: "Receipt Splitter"
+  short_description: "识别小票并输出可审计的最小现金流分账 JSON"
+  default_prompt: "Use $receipt-splitter to analyze receipt images and produce validated minimum-cash-flow JSON."
+  brand_color: "#6C8B62"
+policy:
+  allow_implicit_invocation: true

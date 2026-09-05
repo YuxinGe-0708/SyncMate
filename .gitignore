@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Python caches and local receipt fixtures
+__pycache__/
+*.py[cod]
+skills/receipt-splitter/*.jpg
+skills/receipt-splitter/*.jpeg
+skills/receipt-splitter/*.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

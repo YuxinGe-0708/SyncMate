@@ -12,6 +12,7 @@ import math
 import httpx
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -36,7 +37,11 @@ app.add_middleware(
 
 def load_receipt_helper():
     configured = os.environ.get("SYNCMATE_RECEIPT_SPLITTER")
+    # Prefer an explicitly configured helper, then the version committed with
+    # this application. The user-level Codex skill remains a compatibility
+    # fallback for older local deployments.
     candidates = [configured] if configured else []
+    candidates.append(str(BASE_DIR.parent / "skills" / "receipt-splitter" / "scripts" / "receipt_splitter.py"))
     candidates.append(str(Path.home() / ".codex" / "skills" / "receipt-splitter" / "scripts" / "receipt_splitter.py"))
     for candidate in candidates:
         if candidate and Path(candidate).exists():
@@ -279,6 +284,14 @@ class TravelAutoPlanBody(BaseModel):
 
 class TravelApplyPlanBody(BaseModel):
     option_id: str
+    # Keep the parameters used to generate the preview so applying an option
+    # does not silently rebuild a different route with default times.
+    travel_date: str | None = None
+    max_play_minutes: int | None = Field(default=None, ge=30, le=1440)
+    earliest_start: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    latest_end: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    transport: str | None = Field(default=None, max_length=30)
+    prioritize: str | None = Field(default=None, pattern="^(distance|time|places|comfort|balanced)$")
 
 
 class TravelMemberLocationBody(BaseModel):
@@ -290,6 +303,26 @@ class TravelMemberLocationBody(BaseModel):
 
 class TravelPlaceVoteBody(BaseModel):
     suggestion: str = Field(default="", max_length=500)
+
+
+class CollectionPlanBody(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=1000)
+
+
+class CollectionEntryBody(BaseModel):
+    activity_id: int | None = None
+    activity_name: str = Field(default="", max_length=120)
+    title: str = Field(min_length=1, max_length=120)
+    paid_cents: int = Field(gt=0, le=1000000000)
+    split_mode: str = Field(pattern="^(host|all|subset|ratio)$")
+    participant_ids: list[int] = Field(default_factory=list, max_length=1000)
+    ratios: dict[str, float | str | None] = Field(default_factory=dict)
+
+
+class CollectionReviewBody(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected)$")
+    note: str = Field(default="", max_length=300)
 
 
 @contextmanager
@@ -494,6 +527,56 @@ def migrate_group_schema(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             completed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS collection_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES groups_table(id) ON DELETE CASCADE,
+            creator_id INTEGER NOT NULL REFERENCES users(id),
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'collecting'
+                CHECK(status IN ('collecting','settled','completed','archived')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            settled_at TEXT,
+            completed_at TEXT,
+            archived_at TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_collection_plans_one_collecting
+        ON collection_plans(group_id) WHERE status = 'collecting';
+        CREATE INDEX IF NOT EXISTS idx_collection_plans_group
+        ON collection_plans(group_id, id DESC);
+        CREATE TABLE IF NOT EXISTS collection_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES collection_plans(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            activity_id INTEGER REFERENCES activities(id) ON DELETE SET NULL,
+            activity_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            paid_cents INTEGER NOT NULL CHECK(paid_cents > 0),
+            split_mode TEXT NOT NULL CHECK(split_mode IN ('host','all','subset','ratio')),
+            split_details_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','approved','rejected')),
+            review_note TEXT NOT NULL DEFAULT '',
+            reviewer_id INTEGER REFERENCES users(id),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reviewed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_entries_plan
+        ON collection_entries(plan_id, status, id);
+        CREATE TABLE IF NOT EXISTS collection_transfers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES collection_plans(id) ON DELETE CASCADE,
+            from_user_id INTEGER NOT NULL REFERENCES users(id),
+            to_user_id INTEGER NOT NULL REFERENCES users(id),
+            amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','awaiting_receipt','completed')),
+            payer_confirmed_at TEXT,
+            receiver_confirmed_at TEXT,
+            UNIQUE(plan_id, from_user_id, to_user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_collection_transfers_plan
+        ON collection_transfers(plan_id, status, id);
         CREATE TABLE IF NOT EXISTS expense_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             bill_id INTEGER NOT NULL REFERENCES ai_bills(id) ON DELETE CASCADE,
@@ -770,6 +853,241 @@ def require_role(connection: sqlite3.Connection, group_id: int, user_id: int, ro
     if row["role"] not in roles:
         raise HTTPException(status_code=403, detail="你没有执行此操作的权限")
     return row
+
+
+def collection_member_map(connection: sqlite3.Connection, group_id: int) -> dict[int, dict]:
+    rows = connection.execute(
+        """SELECT users.id, users.username, users.nickname, users.avatar_color,
+        memberships.group_nickname, memberships.role
+        FROM memberships JOIN users ON users.id = memberships.user_id
+        WHERE memberships.group_id = ? ORDER BY users.id""",
+        (group_id,),
+    ).fetchall()
+    return {
+        int(row["id"]): {
+            "id": int(row["id"]), "username": row["username"],
+            "display_name": row["group_nickname"] or row["nickname"],
+            "avatar_color": row["avatar_color"], "initials": initials(row["group_nickname"] or row["nickname"]),
+            "role": row["role"],
+        }
+        for row in rows
+    }
+
+
+def allocate_collection_cents(total_cents: int, weights: dict[int, Decimal]) -> dict[int, int]:
+    usable = {member_id: weight for member_id, weight in weights.items() if weight.is_finite() and weight > 0}
+    total_weight = sum(usable.values(), Decimal(0))
+    if total_cents <= 0 or not usable or total_weight <= 0:
+        raise HTTPException(status_code=400, detail="分摊成员和比例必须大于 0")
+    allocations: dict[int, int] = {}
+    remainders: list[tuple[Decimal, int]] = []
+    for member_id in sorted(usable):
+        exact = Decimal(total_cents) * usable[member_id] / total_weight
+        floor_value = int(exact.to_integral_value(rounding=ROUND_FLOOR))
+        allocations[member_id] = floor_value
+        remainders.append((exact - floor_value, member_id))
+    remaining = total_cents - sum(allocations.values())
+    for _, member_id in sorted(remainders, key=lambda item: (-item[0], item[1]))[:remaining]:
+        allocations[member_id] += 1
+    return allocations
+
+
+def build_collection_split(
+    connection: sqlite3.Connection, group_id: int, payer_id: int, body: CollectionEntryBody,
+) -> dict:
+    members = collection_member_map(connection, group_id)
+    if payer_id not in members:
+        raise HTTPException(status_code=403, detail="付款人已不在群组中")
+    if body.split_mode == "host":
+        weights = {payer_id: Decimal(1)}
+    elif body.split_mode == "all":
+        weights = {member_id: Decimal(1) for member_id in members}
+    elif body.split_mode == "subset":
+        participant_ids = sorted(set(body.participant_ids))
+        if not participant_ids:
+            raise HTTPException(status_code=400, detail="部分成员 AA 至少选择一位成员")
+        if any(member_id not in members for member_id in participant_ids):
+            raise HTTPException(status_code=400, detail="部分成员 AA 中包含非本群成员")
+        weights = {member_id: Decimal(1) for member_id in participant_ids}
+    else:
+        weights = {}
+        try:
+            for raw_id, raw_weight in body.ratios.items():
+                member_id = int(raw_id)
+                if raw_weight is None or (isinstance(raw_weight, str) and not raw_weight.strip()):
+                    continue
+                weight = Decimal(str(raw_weight))
+                if member_id not in members:
+                    raise HTTPException(status_code=400, detail="比例分摊中包含非本群成员")
+                if not weight.is_finite() or weight < 0:
+                    raise HTTPException(status_code=400, detail="分摊比例必须是非负数")
+                if weight > 0:
+                    weights[member_id] = weight
+        except (TypeError, ValueError, InvalidOperation) as error:
+            raise HTTPException(status_code=400, detail="分摊比例格式无效") from error
+        if not weights:
+            raise HTTPException(status_code=400, detail="比例分摊至少需要一位比例大于 0 的成员")
+    allocations = allocate_collection_cents(body.paid_cents, weights)
+    return {
+        "participant_ids": sorted(allocations),
+        "ratios": {str(member_id): float(weights[member_id]) for member_id in sorted(weights)},
+        "allocations_cents": {str(member_id): amount for member_id, amount in sorted(allocations.items())},
+    }
+
+
+def minimum_collection_transfers(balances: dict[int, int]) -> list[dict]:
+    if sum(balances.values()) != 0:
+        raise ValueError("collection balances do not conserve cents")
+    nonzero = [[int(member_id), int(amount)] for member_id, amount in sorted(balances.items()) if amount]
+
+    # Exact branch-and-bound settlement for normal-sized groups.  A plain
+    # largest-debtor/largest-creditor pass can use an unnecessary third edge
+    # for balances such as -5, -5, +6, +4, so we search for the fewest edges
+    # whenever the state is small enough to do so safely.
+    if len(nonzero) <= 14:
+        best: list[dict] | None = None
+
+        def search(state: list[list[int]], operations: list[dict]) -> None:
+            nonlocal best
+            if best is not None and len(operations) >= len(best):
+                return
+            first_index = next((index for index, (_, amount) in enumerate(state) if amount), None)
+            if first_index is None:
+                best = operations.copy()
+                return
+            first_id, first_amount = state[first_index]
+            seen_amounts: set[int] = set()
+            candidates = []
+            for index in range(first_index + 1, len(state)):
+                other_id, other_amount = state[index]
+                if not other_amount or (first_amount > 0) == (other_amount > 0):
+                    continue
+                if other_amount in seen_amounts:
+                    continue
+                seen_amounts.add(other_amount)
+                candidates.append((min(abs(first_amount), abs(other_amount)), other_id, index))
+            # Trying a full cancellation first generally finds the optimum
+            # quickly; IDs make ties deterministic for reproducible plans.
+            for amount, _, index in sorted(candidates, key=lambda item: (-item[0], item[1])):
+                other_id, other_amount = state[index]
+                if first_amount < 0:
+                    transfer = {"from_user_id": first_id, "to_user_id": other_id, "amount_cents": amount}
+                else:
+                    transfer = {"from_user_id": other_id, "to_user_id": first_id, "amount_cents": amount}
+                next_state = [item.copy() for item in state]
+                next_state[first_index][1] += amount if first_amount < 0 else -amount
+                next_state[index][1] += amount if other_amount < 0 else -amount
+                search(next_state, operations + [transfer])
+
+        search(nonzero, [])
+        return best or []
+
+    # Very large groups use a deterministic linear-time fallback.  It still
+    # conserves every cent and avoids exponential work in the API request.
+    debtors = [[member_id, -amount] for member_id, amount in nonzero if amount < 0]
+    creditors = [[member_id, amount] for member_id, amount in nonzero if amount > 0]
+    transfers = []
+    while debtors and creditors:
+        debtors.sort(key=lambda item: (-item[1], item[0]))
+        creditors.sort(key=lambda item: (-item[1], item[0]))
+        debtor_id, debt = debtors[0]
+        creditor_id, credit = creditors[0]
+        amount = min(debt, credit)
+        transfers.append({"from_user_id": debtor_id, "to_user_id": creditor_id, "amount_cents": amount})
+        debtors[0][1] -= amount
+        creditors[0][1] -= amount
+        if debtors[0][1] == 0:
+            debtors.pop(0)
+        if creditors[0][1] == 0:
+            creditors.pop(0)
+    return transfers
+
+
+def collection_plan_access(
+    connection: sqlite3.Connection, plan_id: int, user_id: int,
+) -> tuple[sqlite3.Row, sqlite3.Row]:
+    plan = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (plan_id,)).fetchone()
+    if not plan:
+        raise HTTPException(status_code=404, detail="收款计划不存在")
+    return plan, membership(connection, plan["group_id"], user_id)
+
+
+def collection_plan_json(connection: sqlite3.Connection, plan: sqlite3.Row, user_id: int) -> dict:
+    member = membership(connection, plan["group_id"], user_id)
+    members = collection_member_map(connection, plan["group_id"])
+    entry_rows = connection.execute(
+        """SELECT collection_entries.*, users.username, users.nickname,
+        memberships.group_nickname, reviewer.nickname AS reviewer_nickname
+        FROM collection_entries
+        JOIN users ON users.id = collection_entries.user_id
+        LEFT JOIN memberships ON memberships.group_id = ? AND memberships.user_id = collection_entries.user_id
+        LEFT JOIN users AS reviewer ON reviewer.id = collection_entries.reviewer_id
+        WHERE collection_entries.plan_id = ? ORDER BY collection_entries.id DESC""",
+        (plan["group_id"], plan["id"]),
+    ).fetchall()
+    entries = []
+    paid = {member_id: 0 for member_id in members}
+    owed = {member_id: 0 for member_id in members}
+    for row in entry_rows:
+        details = json.loads(row["split_details_json"])
+        allocations = {int(key): int(value) for key, value in details.get("allocations_cents", {}).items()}
+        participants = [
+            {"user_id": member_id, "display_name": members.get(member_id, {}).get("display_name", f"成员 {member_id}"), "amount_cents": amount}
+            for member_id, amount in sorted(allocations.items())
+        ]
+        if row["status"] == "approved":
+            paid[int(row["user_id"])] = paid.get(int(row["user_id"]), 0) + int(row["paid_cents"])
+            for member_id, amount in allocations.items():
+                owed[member_id] = owed.get(member_id, 0) + amount
+        entries.append({
+            "id": row["id"], "user_id": row["user_id"],
+            "payer_name": row["group_nickname"] or row["nickname"], "username": row["username"],
+            "activity_id": row["activity_id"], "activity_name": row["activity_name"],
+            "title": row["title"], "paid_cents": row["paid_cents"], "split_mode": row["split_mode"],
+            "split_details": details, "participants": participants, "status": row["status"],
+            "review_note": row["review_note"], "reviewer_name": row["reviewer_nickname"],
+            "created_at": row["created_at"], "reviewed_at": row["reviewed_at"],
+        })
+    transfer_rows = connection.execute(
+        """SELECT collection_transfers.*, payer.nickname AS payer_nickname,
+        receiver.nickname AS receiver_nickname, payer_membership.group_nickname AS payer_group_name,
+        receiver_membership.group_nickname AS receiver_group_name
+        FROM collection_transfers
+        JOIN users AS payer ON payer.id = collection_transfers.from_user_id
+        JOIN users AS receiver ON receiver.id = collection_transfers.to_user_id
+        LEFT JOIN memberships AS payer_membership ON payer_membership.group_id = ? AND payer_membership.user_id = payer.id
+        LEFT JOIN memberships AS receiver_membership ON receiver_membership.group_id = ? AND receiver_membership.user_id = receiver.id
+        WHERE collection_transfers.plan_id = ? ORDER BY collection_transfers.id""",
+        (plan["group_id"], plan["group_id"], plan["id"]),
+    ).fetchall()
+    transfers = [{
+        "id": row["id"], "from_user_id": row["from_user_id"], "to_user_id": row["to_user_id"],
+        "from_name": row["payer_group_name"] or row["payer_nickname"],
+        "to_name": row["receiver_group_name"] or row["receiver_nickname"],
+        "amount_cents": row["amount_cents"], "status": row["status"],
+        "payer_confirmed_at": row["payer_confirmed_at"], "receiver_confirmed_at": row["receiver_confirmed_at"],
+    } for row in transfer_rows]
+    summaries = [{
+        "user_id": member_id, "display_name": info["display_name"],
+        "paid_cents": paid.get(member_id, 0), "owed_cents": owed.get(member_id, 0),
+        "balance_cents": paid.get(member_id, 0) - owed.get(member_id, 0),
+    } for member_id, info in members.items() if paid.get(member_id, 0) or owed.get(member_id, 0)]
+    return {
+        "id": plan["id"], "group_id": plan["group_id"], "creator_id": plan["creator_id"],
+        "title": plan["title"], "description": plan["description"], "status": plan["status"],
+        "created_at": plan["created_at"], "settled_at": plan["settled_at"],
+        "completed_at": plan["completed_at"], "archived_at": plan["archived_at"],
+        "is_owner": member["role"] == "owner", "members": list(members.values()),
+        "entries": entries, "transfers": transfers, "member_summaries": summaries,
+        "totals": {
+            "submitted_cents": sum(int(row["paid_cents"]) for row in entry_rows),
+            "approved_cents": sum(int(row["paid_cents"]) for row in entry_rows if row["status"] == "approved"),
+            "pending_count": sum(1 for row in entry_rows if row["status"] == "pending"),
+            "approved_count": sum(1 for row in entry_rows if row["status"] == "approved"),
+            "completed_transfers": sum(1 for row in transfer_rows if row["status"] == "completed"),
+            "transfer_count": len(transfer_rows),
+        },
+    }
 
 
 def validate_time_range(start_at: str, end_at: str) -> None:
@@ -1540,6 +1858,8 @@ def transfer_owner(group_id: int, body: TransferBody, user: sqlite3.Row = Depend
         target = connection.execute("SELECT memberships.*, users.nickname FROM memberships JOIN users ON users.id = memberships.user_id WHERE group_id = ? AND user_id = ?", (group_id, body.new_owner_id)).fetchone()
         if not target:
             raise HTTPException(status_code=400, detail="请选择正式成员作为新群主")
+        if int(body.new_owner_id) == int(user["id"]):
+            raise HTTPException(status_code=400, detail="新群主不能是当前群主")
         connection.execute("UPDATE memberships SET role = 'admin' WHERE group_id = ? AND user_id = ?", (group_id, user["id"]))
         connection.execute("UPDATE memberships SET role = 'owner' WHERE group_id = ? AND user_id = ?", (group_id, body.new_owner_id))
         connection.execute("UPDATE groups_table SET owner_id = ? WHERE id = ?", (body.new_owner_id, group_id))
@@ -1603,8 +1923,18 @@ def activity_json(connection: sqlite3.Connection, activity: sqlite3.Row, user_id
         if activity["budget_per_person"] is not None and location["budget_per_person"] is not None:
             ratio = float(location["budget_per_person"]) / max(float(activity["budget_per_person"]), 1)
             budget_score = max(0.0, 100.0 - abs(ratio - 1) * 100)
-        score = distance_score * 0.35 + vote_score * 0.30 + budget_score * 0.20 + 100.0 * 0.15
-        location_payload.append({**dict(location), "average_distance_km": round(average_distance, 2) if average_distance is not None else None, "distance_score": round(distance_score, 1), "vote_count": len(votes_for), "vote_score": round(vote_score, 1), "budget_score": round(budget_score, 1), "opening_score": 100.0, "score": round(score, 1), "votes": votes_for})
+        scheduled_slots = slots or items
+        opening_score = 100.0
+        if location["opening_hours"] and scheduled_slots:
+            compatible = 0
+            for scheduled in scheduled_slots:
+                start_at = scheduled["start_at"]
+                end_at = scheduled["end_at"]
+                if not opening_time_conflict(location["opening_hours"], start_at, end_at):
+                    compatible += 1
+            opening_score = compatible / len(scheduled_slots) * 100
+        score = distance_score * 0.35 + vote_score * 0.30 + budget_score * 0.20 + opening_score * 0.15
+        location_payload.append({**dict(location), "average_distance_km": round(average_distance, 2) if average_distance is not None else None, "distance_score": round(distance_score, 1), "vote_count": len(votes_for), "vote_score": round(vote_score, 1), "budget_score": round(budget_score, 1), "opening_score": round(opening_score, 1), "score": round(score, 1), "votes": votes_for})
     return {
         **dict(activity), "creator_name": creator["nickname"] if creator else "", "items": [dict(row) for row in items],
         "slots": votes, "member_count": member_count, "voted_count": voted_count,
@@ -1752,11 +2082,30 @@ def vote_activity(group_id: int, activity_id: int, body: VoteBody, user: sqlite3
             raise HTTPException(status_code=400, detail="该活动当前不可投票")
         valid_slots = {row["id"] for row in connection.execute("SELECT id FROM activity_slots WHERE activity_id = ?", (activity_id,)).fetchall()}
         valid_locations = {row["id"] for row in connection.execute("SELECT id FROM activity_locations WHERE activity_id = ?", (activity_id,)).fetchall()}
-        submitted_slots = {int(choice.get("slot_id", 0)) for choice in body.choices}
+        if len(body.choices) != len({str(choice.get("slot_id", "")) for choice in body.choices if isinstance(choice, dict)}):
+            raise HTTPException(status_code=400, detail="每个候选时间段只能填写一次")
+        try:
+            submitted_slots = {int(choice.get("slot_id", 0)) for choice in body.choices}
+        except (AttributeError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=400, detail="候选时间段编号无效") from error
         if submitted_slots != valid_slots:
             raise HTTPException(status_code=400, detail="请填写每一个候选时间段")
+        for choice in body.choices:
+            available = choice.get("available") if isinstance(choice, dict) else None
+            if not isinstance(available, (bool, int)) or isinstance(available, bool) is False and available not in {0, 1}:
+                raise HTTPException(status_code=400, detail="时间段可用状态无效")
         location_choice = body.location_choices[0] if body.location_choices else None
-        if valid_locations and (not location_choice or int(location_choice.get("location_id", 0)) not in valid_locations):
+        if len(body.location_choices) > 1:
+            raise HTTPException(status_code=400, detail="只能选择一个候选地点")
+        if location_choice is not None and not isinstance(location_choice, dict):
+            raise HTTPException(status_code=400, detail="候选地点选择无效")
+        location_id = None
+        if location_choice is not None:
+            try:
+                location_id = int(location_choice.get("location_id", 0))
+            except (AttributeError, TypeError, ValueError) as error:
+                raise HTTPException(status_code=400, detail="候选地点编号无效") from error
+        if valid_locations and (location_id is None or location_id not in valid_locations):
             raise HTTPException(status_code=400, detail="请选择一个候选地点")
         connection.execute("DELETE FROM activity_votes WHERE activity_id = ? AND user_id = ?", (activity_id, user["id"]))
         for choice in body.choices:
@@ -1765,7 +2114,7 @@ def vote_activity(group_id: int, activity_id: int, body: VoteBody, user: sqlite3
                 continue
             connection.execute("INSERT INTO activity_votes(activity_id, slot_id, user_id, available, suggestion) VALUES (?, ?, ?, ?, ?)", (activity_id, slot_id, user["id"], int(bool(choice.get("available"))), str(choice.get("suggestion", ""))[:300]))
         if location_choice:
-            connection.execute("INSERT INTO activity_location_votes(activity_id, location_id, user_id, suggestion) VALUES (?, ?, ?, ?) ON CONFLICT(activity_id, user_id) DO UPDATE SET location_id = excluded.location_id, suggestion = excluded.suggestion, updated_at = CURRENT_TIMESTAMP", (activity_id, int(location_choice["location_id"]), user["id"], str(location_choice.get("suggestion", ""))[:300]))
+            connection.execute("INSERT INTO activity_location_votes(activity_id, location_id, user_id, suggestion) VALUES (?, ?, ?, ?) ON CONFLICT(activity_id, user_id) DO UPDATE SET location_id = excluded.location_id, suggestion = excluded.suggestion, updated_at = CURRENT_TIMESTAMP", (activity_id, location_id, user["id"], str(location_choice.get("suggestion", ""))[:300]))
         audit(connection, group_id, user["id"], "activity_voted", f"提交了活动“{activity['title']}”的时间投票")
         return activity_json(connection, activity, user["id"])
 
@@ -1863,6 +2212,18 @@ def validate_ai_bill_result(result: dict, member_ids: set[int], payer_id: int) -
         raise HTTPException(status_code=422, detail="实际付款人或付款金额校验失败")
     if sum(int(item.get("amount_cents") or 0) for item in participants) != total:
         raise HTTPException(status_code=422, detail="成员承担金额合计与票据总额不一致")
+    participant_ids = []
+    for item in participants:
+        try:
+            participant_id = int(item.get("user_id") or 0)
+            amount_cents = int(item.get("amount_cents") or 0)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail="成员承担金额格式无效") from error
+        if amount_cents < 0:
+            raise HTTPException(status_code=422, detail="成员承担金额不能为负数")
+        participant_ids.append(participant_id)
+    if len(participant_ids) != len(set(participant_ids)):
+        raise HTTPException(status_code=422, detail="分账结果包含重复成员")
     referenced_ids = {
         *(int(item.get("user_id") or 0) for item in payers),
         *(int(item.get("user_id") or 0) for item in participants),
@@ -1871,6 +2232,24 @@ def validate_ai_bill_result(result: dict, member_ids: set[int], payer_id: int) -
     }
     if not referenced_ids.issubset(member_ids):
         raise HTTPException(status_code=422, detail="分账结果包含不属于目标群组的成员")
+    balances = {int(item["user_id"]): int(item["amount_cents"]) for item in payers}
+    for item in participants:
+        balances[int(item["user_id"])] = balances.get(int(item["user_id"]), 0) - int(item["amount_cents"])
+    for transfer in transfers:
+        try:
+            from_id = int(transfer.get("from_user_id") or 0)
+            to_id = int(transfer.get("to_user_id") or 0)
+            amount_cents = int(transfer.get("amount_cents") or 0)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise HTTPException(status_code=422, detail="转账现金流格式无效") from error
+        if from_id == to_id or amount_cents <= 0:
+            raise HTTPException(status_code=422, detail="转账必须是成员之间的正数金额")
+        # A transfer settles the debtor's negative balance against the
+        # creditor's positive balance: move both toward zero.
+        balances[from_id] = balances.get(from_id, 0) + amount_cents
+        balances[to_id] = balances.get(to_id, 0) - amount_cents
+    if any(amount != 0 for amount in balances.values()):
+        raise HTTPException(status_code=422, detail="转账现金流与成员承担金额不一致")
 
 
 @app.post("/api/groups/{group_id}/ai-bills/analyze", status_code=201)
@@ -2202,6 +2581,260 @@ def archive_ai_bill(group_id: int, bill_id: int, user: sqlite3.Row = Depends(cur
         return {"ok": True}
 
 
+@app.get("/api/groups/{group_id}/collection-plans")
+def list_collection_plans(group_id: int, user: sqlite3.Row = Depends(current_user)) -> list[dict]:
+    with db() as connection:
+        membership(connection, group_id, user["id"])
+        rows = connection.execute(
+            "SELECT * FROM collection_plans WHERE group_id = ? ORDER BY id DESC", (group_id,),
+        ).fetchall()
+        return [collection_plan_json(connection, row, user["id"]) for row in rows]
+
+
+@app.post("/api/groups/{group_id}/collection-plans", status_code=201)
+def create_collection_plan(
+    group_id: int, body: CollectionPlanBody, user: sqlite3.Row = Depends(current_user),
+) -> dict:
+    with db() as connection:
+        require_role(connection, group_id, user["id"], {"owner"})
+        existing = connection.execute(
+            "SELECT id FROM collection_plans WHERE group_id = ? AND status = 'collecting'", (group_id,),
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="该群组已有进行中的收款计划，请先结算后再新建")
+        try:
+            cursor = connection.execute(
+                "INSERT INTO collection_plans(group_id, creator_id, title, description) VALUES (?, ?, ?, ?)",
+                (group_id, user["id"], body.title.strip(), body.description.strip()),
+            )
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(status_code=409, detail="该群组已有进行中的收款计划") from error
+        plan = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        audit(connection, group_id, user["id"], "collection_plan_created", f"发起了收款计划“{plan['title']}”")
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.get("/api/collection-plans/{plan_id}")
+def get_collection_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan, _ = collection_plan_access(connection, plan_id, user["id"])
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.post("/api/collection-plans/{plan_id}/entries", status_code=201)
+def create_collection_entry(
+    plan_id: int, body: CollectionEntryBody, user: sqlite3.Row = Depends(current_user),
+) -> dict:
+    with db() as connection:
+        plan, _ = collection_plan_access(connection, plan_id, user["id"])
+        if plan["status"] != "collecting":
+            raise HTTPException(status_code=409, detail="该收款计划已经结算，不能继续提交款项")
+        if body.activity_id is not None:
+            activity = connection.execute(
+                "SELECT title FROM activities WHERE id = ? AND group_id = ?",
+                (body.activity_id, plan["group_id"]),
+            ).fetchone()
+            if not activity:
+                raise HTTPException(status_code=400, detail="所选活动不属于当前群组")
+            activity_name = activity["title"]
+        else:
+            activity_name = body.activity_name.strip()
+            if not activity_name:
+                raise HTTPException(status_code=400, detail="请选择所属活动或填写活动名称")
+        split_details = build_collection_split(connection, plan["group_id"], user["id"], body)
+        cursor = connection.execute(
+            """INSERT INTO collection_entries(
+                plan_id, user_id, activity_id, activity_name, title, paid_cents, split_mode, split_details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                plan_id, user["id"], body.activity_id, activity_name, body.title.strip(), body.paid_cents,
+                body.split_mode, json.dumps(split_details, ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
+        audit(
+            connection, plan["group_id"], user["id"], "collection_entry_submitted",
+            f"提交了垫付款“{body.title.strip()}” ¥{body.paid_cents / 100:.2f}", target_id=cursor.lastrowid,
+        )
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.delete("/api/collection-entries/{entry_id}")
+def delete_collection_entry(entry_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            """SELECT collection_entries.*, collection_plans.group_id, collection_plans.status AS plan_status
+            FROM collection_entries JOIN collection_plans ON collection_plans.id = collection_entries.plan_id
+            WHERE collection_entries.id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="垫付款记录不存在")
+        membership(connection, row["group_id"], user["id"])
+        if row["user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="只能撤回自己提交的记录")
+        if row["plan_status"] != "collecting" or row["status"] != "pending":
+            raise HTTPException(status_code=409, detail="只有待审核的记录可以撤回")
+        connection.execute("DELETE FROM collection_entries WHERE id = ?", (entry_id,))
+        audit(connection, row["group_id"], user["id"], "collection_entry_withdrawn", f"撤回了垫付款“{row['title']}”")
+        return {"ok": True}
+
+
+@app.post("/api/collection-entries/{entry_id}/review")
+def review_collection_entry(
+    entry_id: int, body: CollectionReviewBody, user: sqlite3.Row = Depends(current_user),
+) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            """SELECT collection_entries.*, collection_plans.group_id, collection_plans.status AS plan_status
+            FROM collection_entries JOIN collection_plans ON collection_plans.id = collection_entries.plan_id
+            WHERE collection_entries.id = ?""",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="垫付款记录不存在")
+        require_role(connection, row["group_id"], user["id"], {"owner"})
+        if row["plan_status"] != "collecting" or row["status"] != "pending":
+            raise HTTPException(status_code=409, detail="该记录已审核或收款计划已经结算")
+        connection.execute(
+            """UPDATE collection_entries SET status = ?, review_note = ?, reviewer_id = ?,
+            reviewed_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (body.decision, body.note.strip(), user["id"], entry_id),
+        )
+        decision_label = "通过" if body.decision == "approved" else "拒绝"
+        audit(connection, row["group_id"], user["id"], "collection_entry_reviewed", f"{decision_label}了垫付款“{row['title']}”")
+        plan = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (row["plan_id"],)).fetchone()
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.post("/api/collection-plans/{plan_id}/settle")
+def settle_collection_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan, _ = collection_plan_access(connection, plan_id, user["id"])
+        require_role(connection, plan["group_id"], user["id"], {"owner"})
+        if plan["status"] != "collecting":
+            raise HTTPException(status_code=409, detail="该收款计划已经结算")
+        entries = connection.execute(
+            "SELECT * FROM collection_entries WHERE plan_id = ? AND status = 'approved' ORDER BY id", (plan_id,),
+        ).fetchall()
+        if not entries:
+            raise HTTPException(status_code=409, detail="至少审核通过一笔垫付款后才能结算")
+        members = collection_member_map(connection, plan["group_id"])
+        balances = {member_id: 0 for member_id in members}
+        for entry in entries:
+            payer_id = int(entry["user_id"])
+            details = json.loads(entry["split_details_json"])
+            allocations = {int(key): int(value) for key, value in details.get("allocations_cents", {}).items()}
+            involved = {payer_id, *allocations.keys()}
+            if any(member_id not in members for member_id in involved):
+                raise HTTPException(status_code=409, detail=f"“{entry['title']}”涉及已离开群组的成员，请处理后再结算")
+            if sum(allocations.values()) != int(entry["paid_cents"]):
+                raise HTTPException(status_code=422, detail=f"“{entry['title']}”的分摊金额校验失败")
+            balances[payer_id] += int(entry["paid_cents"])
+            for member_id, amount in allocations.items():
+                balances[member_id] -= amount
+        transfers = minimum_collection_transfers(balances)
+        for transfer in transfers:
+            connection.execute(
+                """INSERT INTO collection_transfers(plan_id, from_user_id, to_user_id, amount_cents)
+                VALUES (?, ?, ?, ?)""",
+                (plan_id, transfer["from_user_id"], transfer["to_user_id"], transfer["amount_cents"]),
+            )
+        connection.execute(
+            """UPDATE collection_entries SET status = 'rejected', review_note = '结算时尚未审核，本次未计入',
+            reviewer_id = ?, reviewed_at = CURRENT_TIMESTAMP WHERE plan_id = ? AND status = 'pending'""",
+            (user["id"], plan_id),
+        )
+        next_status = "settled" if transfers else "completed"
+        completed_sql = ", completed_at = CURRENT_TIMESTAMP" if not transfers else ""
+        connection.execute(
+            f"UPDATE collection_plans SET status = ?, settled_at = CURRENT_TIMESTAMP{completed_sql} WHERE id = ?",
+            (next_status, plan_id),
+        )
+        audit(
+            connection, plan["group_id"], user["id"], "collection_plan_settled",
+            f"结算了收款计划“{plan['title']}”，生成 {len(transfers)} 笔转账",
+        )
+        updated = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (plan_id,)).fetchone()
+        return collection_plan_json(connection, updated, user["id"])
+
+
+@app.post("/api/collection-transfers/{transfer_id}/confirm-payment")
+def confirm_collection_payment(transfer_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            """SELECT collection_transfers.*, collection_plans.group_id, collection_plans.status AS plan_status
+            FROM collection_transfers JOIN collection_plans ON collection_plans.id = collection_transfers.plan_id
+            WHERE collection_transfers.id = ?""",
+            (transfer_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="转账记录不存在")
+        membership(connection, row["group_id"], user["id"])
+        if row["from_user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="只能确认自己需要支付的转账")
+        if row["plan_status"] not in {"settled", "completed"}:
+            raise HTTPException(status_code=409, detail="收款计划尚未结算或已经归档")
+        if row["status"] == "pending":
+            connection.execute(
+                """UPDATE collection_transfers SET status = 'awaiting_receipt',
+                payer_confirmed_at = CURRENT_TIMESTAMP WHERE id = ?""", (transfer_id,),
+            )
+            audit(connection, row["group_id"], user["id"], "collection_payment_confirmed", "确认已完成收款计划转账")
+        plan = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (row["plan_id"],)).fetchone()
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.post("/api/collection-transfers/{transfer_id}/confirm-receipt")
+def confirm_collection_receipt(transfer_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            """SELECT collection_transfers.*, collection_plans.group_id, collection_plans.status AS plan_status
+            FROM collection_transfers JOIN collection_plans ON collection_plans.id = collection_transfers.plan_id
+            WHERE collection_transfers.id = ?""",
+            (transfer_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="转账记录不存在")
+        membership(connection, row["group_id"], user["id"])
+        if row["to_user_id"] != user["id"]:
+            raise HTTPException(status_code=403, detail="只能确认自己应收的转账")
+        if row["plan_status"] not in {"settled", "completed"}:
+            raise HTTPException(status_code=409, detail="收款计划尚未结算或已经归档")
+        if row["status"] == "pending":
+            raise HTTPException(status_code=409, detail="付款成员尚未确认付款")
+        if row["status"] == "awaiting_receipt":
+            connection.execute(
+                """UPDATE collection_transfers SET status = 'completed',
+                receiver_confirmed_at = CURRENT_TIMESTAMP WHERE id = ?""", (transfer_id,),
+            )
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM collection_transfers WHERE plan_id = ? AND status != 'completed'", (row["plan_id"],),
+            ).fetchone()[0]
+            if not pending:
+                connection.execute(
+                    "UPDATE collection_plans SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (row["plan_id"],),
+                )
+            audit(connection, row["group_id"], user["id"], "collection_receipt_confirmed", "确认已收到收款计划款项")
+        plan = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (row["plan_id"],)).fetchone()
+        return collection_plan_json(connection, plan, user["id"])
+
+
+@app.post("/api/collection-plans/{plan_id}/archive")
+def archive_collection_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan, _ = collection_plan_access(connection, plan_id, user["id"])
+        require_role(connection, plan["group_id"], user["id"], {"owner"})
+        if plan["status"] != "completed":
+            raise HTTPException(status_code=409, detail="所有付款与收款都确认后才能归档")
+        connection.execute(
+            "UPDATE collection_plans SET status = 'archived', archived_at = CURRENT_TIMESTAMP WHERE id = ?", (plan_id,),
+        )
+        audit(connection, plan["group_id"], user["id"], "collection_plan_archived", f"归档了收款计划“{plan['title']}”")
+        updated = connection.execute("SELECT * FROM collection_plans WHERE id = ?", (plan_id,)).fetchone()
+        return collection_plan_json(connection, updated, user["id"])
+
+
 @app.post("/api/groups/{group_id}/logs/{log_id}/undo")
 def undo_log(group_id: int, log_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
     with db() as connection:
@@ -2313,6 +2946,11 @@ def calendar(user: sqlite3.Row = Depends(current_user)) -> list[dict]:
             activity.update({"calendar_type": "confirmed_activity", "is_confirmed": True, "reminder_at": activity.get("start_at")})
             try:
                 start = datetime.fromisoformat((activity.get("start_at") or "").replace("Z", "+00:00"))
+                # datetime-local values from the browser are timezone-naive;
+                # treat them as UTC (the server's canonical timezone) so the
+                # reminder comparison does not raise or silently skip alerts.
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
                 activity["reminder_label"] = "即将开始" if start <= now + timedelta(hours=24) else "已加入日程"
             except (TypeError, ValueError):
                 activity["reminder_label"] = "已加入日程"
@@ -2380,6 +3018,18 @@ def delete_calendar_availability(slot_id: int, user: sqlite3.Row = Depends(curre
 TRAVEL_STATUSES = {"draft", "planning", "pending", "published", "ended", "archived"}
 TRAVEL_TYPES = {"attraction", "hotel", "restaurant", "shopping", "meeting", "other"}
 TRAVEL_SPEEDS_KMH = {"walk": 4.5, "walking": 4.5, "transit": 25.0, "公交": 25.0, "drive": 35.0, "driving": 35.0, "驾车": 35.0, "bike": 15.0, "骑行": 15.0}
+
+
+def parse_clock(value: str, field_name: str) -> int:
+    """Parse a strict HH:MM value and return minutes since midnight."""
+    try:
+        hour_text, minute_text = value.split(":", 1)
+        hour, minute = int(hour_text), int(minute_text)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=f"{field_name}格式必须为 HH:MM") from error
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise HTTPException(status_code=400, detail=f"{field_name}必须是有效的 00:00-23:59 时间")
+    return hour * 60 + minute
 
 
 def parse_travel_date(value: str) -> datetime.date:
@@ -2619,6 +3269,8 @@ def update_travel_plan(plan_id: int, body: TravelPlanUpdateBody, user: sqlite3.R
         start_date = values.get("start_date", plan["start_date"])
         end_date = values.get("end_date", plan["end_date"])
         validate_travel_dates(start_date, end_date)
+        if values.get("status") == "published":
+            raise HTTPException(status_code=400, detail="请先通过发布前检查，再使用发布行程接口")
         if values.get("status") == "archived" and plan["status"] != "ended":
             raise HTTPException(status_code=400, detail="只有已结束的旅行计划可以归档")
         if values:
@@ -2822,6 +3474,10 @@ def get_travel_route(day_id: int, user: sqlite3.Row = Depends(current_user)) -> 
 
 
 def build_auto_plan_options(connection: sqlite3.Connection, plan: sqlite3.Row, body: TravelAutoPlanBody) -> list[dict]:
+    earliest_minutes = parse_clock(body.earliest_start, "最早出发时间")
+    latest_minutes = parse_clock(body.latest_end, "最晚结束时间")
+    if latest_minutes <= earliest_minutes:
+        raise HTTPException(status_code=400, detail="最晚结束时间必须晚于最早出发时间")
     place_rows = connection.execute("SELECT * FROM travel_places WHERE plan_id = ? ORDER BY must_visit DESC, id", (plan["id"],)).fetchall()
     if body.place_ids:
         allowed = set(body.place_ids)
@@ -2848,20 +3504,30 @@ def build_auto_plan_options(connection: sqlite3.Connection, plan: sqlite3.Row, b
         cursor = 0
         for date_value in dates:
             existing = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? AND travel_date = ?", (plan["id"], date_value)).fetchone()
-            max_count = max(1, min(len(ordered), int(body.max_play_minutes / 90)))
-            selected = ordered[cursor:cursor + max_count] if len(dates) > 1 else ordered[:max_count]
-            cursor += max_count
-            if not selected:
-                selected = ordered[:max_count]
+            start_place = connection.execute("SELECT * FROM travel_places WHERE id = ? AND plan_id = ?", (existing["start_place_id"], plan["id"])).fetchone() if existing and existing["start_place_id"] else None
+            end_place = connection.execute("SELECT * FROM travel_places WHERE id = ? AND plan_id = ?", (existing["end_place_id"], plan["id"])).fetchone() if existing and existing["end_place_id"] else None
+            window_end = min(latest_minutes, earliest_minutes + body.max_play_minutes)
             nodes = []
-            current_minutes = int(body.earliest_start[:2]) * 60 + int(body.earliest_start[3:])
-            for place in selected:
-                arrival = f"{date_value}T{current_minutes // 60:02d}:{current_minutes % 60:02d}"
-                depart_minutes = current_minutes + 60
+            selected = []
+            current_minutes = earliest_minutes
+            previous = start_place
+            for place in ordered[cursor:]:
+                leg_distance = haversine_km(previous["lat"], previous["lng"], place["lat"], place["lng"]) if previous else 0.0
+                leg_duration = travel_duration_minutes(leg_distance, body.transport)
+                arrival_minutes = current_minutes + leg_duration
+                depart_minutes = arrival_minutes + 60
+                if depart_minutes > window_end:
+                    break
+                selected.append(place)
+                arrival = f"{date_value}T{arrival_minutes // 60:02d}:{arrival_minutes % 60:02d}"
                 nodes.append({"place_id": place["id"], "place_name": place["name"], "arrival_at": arrival, "stay_minutes": 60, "depart_at": f"{date_value}T{depart_minutes // 60:02d}:{depart_minutes % 60:02d}", "transport": body.transport, "confirmed": False})
-                current_minutes = depart_minutes + 30
-            total_distance = sum(haversine_km(selected[index - 1]["lat"], selected[index - 1]["lng"], selected[index]["lat"], selected[index]["lng"]) for index in range(1, len(selected)))
-            total_duration = len(selected) * 60 + max(0, len(selected) - 1) * 30 + travel_duration_minutes(total_distance, body.transport)
+                current_minutes = depart_minutes
+                previous = place
+            cursor += len(selected)
+            route_places = ([start_place] if start_place else []) + selected + ([end_place] if end_place else [])
+            total_distance = sum(haversine_km(route_places[index - 1]["lat"], route_places[index - 1]["lng"], route_places[index]["lat"], route_places[index]["lng"]) for index in range(1, len(route_places)))
+            total_travel_duration = sum(travel_duration_minutes(haversine_km(route_places[index - 1]["lat"], route_places[index - 1]["lng"], route_places[index]["lat"], route_places[index]["lng"]), body.transport) for index in range(1, len(route_places)))
+            total_duration = len(selected) * 60 + total_travel_duration
             day_payloads.append({"travel_date": date_value, "title": f"{date_value} 推荐路线", "day_id": existing["id"] if existing else None, "nodes": nodes, "total_distance_km": round(total_distance, 2), "total_duration_min": total_duration, "budget_cents": int(sum(float(place["avg_cost"] or 0) * 100 for place in selected)), "unassigned_place_ids": [place["id"] for place in ordered if place["id"] not in {item["place_id"] for item in nodes}]})
         total_distance = round(sum(day["total_distance_km"] for day in day_payloads), 2)
         total_duration = sum(day["total_duration_min"] for day in day_payloads)
@@ -2884,7 +3550,18 @@ def apply_travel_plan(plan_id: int, body: TravelApplyPlanBody, user: sqlite3.Row
         plan = require_travel_manager(connection, plan_id, user["id"])
         if body.option_id not in {"distance", "time", "places", "comfort", "balanced"}:
             raise HTTPException(status_code=400, detail="路线方案不存在，请重新生成")
-        options = build_auto_plan_options(connection, plan, TravelAutoPlanBody(prioritize=body.option_id if body.option_id != "balanced" else "distance"))
+        options = build_auto_plan_options(
+            connection,
+            plan,
+            TravelAutoPlanBody(
+                travel_date=body.travel_date,
+                max_play_minutes=body.max_play_minutes or 600,
+                earliest_start=body.earliest_start or "09:00",
+                latest_end=body.latest_end or "21:00",
+                transport=body.transport or plan["default_transport"],
+                prioritize=body.prioritize or (body.option_id if body.option_id != "balanced" else "distance"),
+            ),
+        )
         option = next((item for item in options if item["option_id"] == body.option_id), options[0])
         applied = []
         for day_data in option["days"]:
