@@ -106,3 +106,12 @@ $env:SYNCMATE_QWEN_MODEL = "qwen3-vl-plus"
 ```
 
 然后运行 `start-backend.cmd`。如果未配置密钥，AI 分账接口会返回明确的配置错误，不会伪造分账结果。
+
+## 腾讯云生产部署
+
+生产环境由 Nginx 提供前端和 `/api` 反向代理，FastAPI 由 systemd 开机自启，数据库使用 `/opt/syncmate/data/syncmate.db`。部署配置模板位于 `deploy/`；服务器密钥只写入 `/etc/syncmate.env`，不要提交到 GitHub。
+
+- 访问地址：`http://43.143.228.182/`
+- 后端检查：`curl http://127.0.0.1:8000/api/health`
+- 服务状态：`sudo systemctl status syncmate nginx`
+- 更新代码：在 `/opt/syncmate-app` 执行 `git pull`、`npm ci && npm run build`，然后执行 `sudo systemctl restart syncmate`
