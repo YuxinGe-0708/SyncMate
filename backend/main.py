@@ -294,9 +294,14 @@ class TravelPlaceVoteBody(BaseModel):
 
 @contextmanager
 def db():
-    connection = sqlite3.connect(DB_PATH)
+    # Keep the production database in its configured directory and tolerate
+    # short concurrent writes from multiple browser sessions.
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 30000")
+    connection.execute("PRAGMA journal_mode = WAL")
     try:
         yield connection
         connection.commit()
