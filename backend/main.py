@@ -9,6 +9,7 @@ import sqlite3
 import base64
 import importlib.util
 import math
+import httpx
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -145,6 +146,13 @@ class LocationBody(BaseModel):
     lng: float = Field(ge=-180, le=180)
 
 
+class ExpenseLocationBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    address: str = Field(default="", max_length=500)
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+
+
 class AvailabilityBody(BaseModel):
     start_at: str
     end_at: str
@@ -157,6 +165,131 @@ class PublishBody(BaseModel):
     items: list[ActivityItemBody] = Field(default_factory=list)
     notice: str = Field(default="", max_length=1000)
     location_id: int | None = None
+
+
+class TravelPlanBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    destination: str = Field(min_length=1, max_length=200)
+    start_date: str
+    end_date: str
+    departure_city: str = Field(default="", max_length=120)
+    default_start_point: str = Field(default="", max_length=200)
+    default_transport: str = Field(default="drive", max_length=30)
+    estimated_people: int = Field(default=1, ge=1, le=1000)
+    budget_cents: int = Field(default=0, ge=0, le=1000000000)
+    budget: float | None = Field(default=None, ge=0, le=10000000)
+    notes: str = Field(default="", max_length=2000)
+
+
+class TravelPlanUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    destination: str | None = Field(default=None, min_length=1, max_length=200)
+    start_date: str | None = None
+    end_date: str | None = None
+    departure_city: str | None = Field(default=None, max_length=120)
+    default_start_point: str | None = Field(default=None, max_length=200)
+    default_transport: str | None = Field(default=None, max_length=30)
+    estimated_people: int | None = Field(default=None, ge=1, le=1000)
+    budget_cents: int | None = Field(default=None, ge=0, le=1000000000)
+    budget: float | None = Field(default=None, ge=0, le=10000000)
+    status: str | None = Field(default=None, pattern="^(draft|planning|pending|published|ended|archived)$")
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class TravelPlaceBody(BaseModel):
+    type: str = Field(default="other", pattern="^(attraction|hotel|restaurant|shopping|meeting|other)$")
+    name: str = Field(min_length=1, max_length=160)
+    address: str = Field(default="", max_length=500)
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    provider_place_id: str = Field(default="", max_length=160)
+    opening_hours: str = Field(default="", max_length=300)
+    avg_cost: float | None = Field(default=None, ge=0, le=1000000)
+    phone: str = Field(default="", max_length=60)
+    rating: float | None = Field(default=None, ge=0, le=5)
+    must_visit: bool = False
+    note: str = Field(default="", max_length=1000)
+    image_url: str = Field(default="", max_length=1000)
+
+
+class TravelPlaceUpdateBody(BaseModel):
+    type: str | None = Field(default=None, pattern="^(attraction|hotel|restaurant|shopping|meeting|other)$")
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    address: str | None = Field(default=None, max_length=500)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    provider_place_id: str | None = Field(default=None, max_length=160)
+    opening_hours: str | None = Field(default=None, max_length=300)
+    avg_cost: float | None = Field(default=None, ge=0, le=1000000)
+    phone: str | None = Field(default=None, max_length=60)
+    rating: float | None = Field(default=None, ge=0, le=5)
+    must_visit: bool | None = None
+    note: str | None = Field(default=None, max_length=1000)
+    image_url: str | None = Field(default=None, max_length=1000)
+
+
+class TravelDayBody(BaseModel):
+    travel_date: str
+    title: str = Field(default="", max_length=160)
+    start_at: str | None = None
+    end_at: str | None = None
+    start_place_id: int | None = None
+    end_place_id: int | None = None
+    transport: str = Field(default="drive", max_length=30)
+    budget_cents: int = Field(default=0, ge=0, le=1000000000)
+    notes: str = Field(default="", max_length=2000)
+    status: str = Field(default="draft", pattern="^(draft|confirmed)$")
+
+
+class TravelDayUpdateBody(BaseModel):
+    travel_date: str | None = None
+    title: str | None = Field(default=None, max_length=160)
+    start_at: str | None = None
+    end_at: str | None = None
+    start_place_id: int | None = None
+    end_place_id: int | None = None
+    transport: str | None = Field(default=None, max_length=30)
+    budget_cents: int | None = Field(default=None, ge=0, le=1000000000)
+    notes: str | None = Field(default=None, max_length=2000)
+    status: str | None = Field(default=None, pattern="^(draft|confirmed)$")
+
+
+class TravelRouteNodeBody(BaseModel):
+    place_id: int
+    arrival_at: str | None = None
+    stay_minutes: int = Field(default=60, ge=0, le=1440)
+    depart_at: str | None = None
+    transport: str | None = Field(default=None, max_length=30)
+    confirmed: bool = True
+
+
+class TravelRouteBody(BaseModel):
+    nodes: list[TravelRouteNodeBody] = Field(default_factory=list, max_length=100)
+
+
+class TravelAutoPlanBody(BaseModel):
+    travel_date: str | None = None
+    place_ids: list[int] = Field(default_factory=list, max_length=100)
+    max_play_minutes: int = Field(default=600, ge=30, le=1440)
+    earliest_start: str = Field(default="09:00", pattern=r"^\d{2}:\d{2}$")
+    latest_end: str = Field(default="21:00", pattern=r"^\d{2}:\d{2}$")
+    transport: str = Field(default="drive", max_length=30)
+    prioritize: str = Field(default="balanced", pattern="^(distance|time|places|comfort|balanced)$")
+
+
+class TravelApplyPlanBody(BaseModel):
+    option_id: str
+
+
+class TravelMemberLocationBody(BaseModel):
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    address: str = Field(default="", max_length=500)
+    participating: bool = True
+
+
+class TravelPlaceVoteBody(BaseModel):
+    suggestion: str = Field(default="", max_length=500)
 
 
 @contextmanager
@@ -351,6 +484,26 @@ def migrate_group_schema(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'pending',
             completed_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS expense_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_id INTEGER NOT NULL REFERENCES ai_bills(id) ON DELETE CASCADE,
+            group_id INTEGER NOT NULL REFERENCES groups_table(id) ON DELETE CASCADE,
+            receipt_index INTEGER NOT NULL DEFAULT 1,
+            merchant_name TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT '其他',
+            category_breakdown TEXT NOT NULL DEFAULT '{}',
+            amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+            spent_at TEXT NOT NULL,
+            location_name TEXT,
+            address TEXT NOT NULL DEFAULT '',
+            lat REAL,
+            lng REAL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(bill_id, receipt_index)
+        );
+        CREATE INDEX IF NOT EXISTS idx_expense_records_group_time
+        ON expense_records(group_id, spent_at);
         CREATE TABLE IF NOT EXISTS calendar_availability (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -364,10 +517,116 @@ def migrate_group_schema(connection: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_calendar_availability_user_time
         ON calendar_availability(user_id, start_at);
+        CREATE TABLE IF NOT EXISTS travel_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL REFERENCES groups_table(id) ON DELETE CASCADE,
+            creator_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            destination TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            departure_city TEXT NOT NULL DEFAULT '',
+            default_start_point TEXT NOT NULL DEFAULT '',
+            default_transport TEXT NOT NULL DEFAULT 'drive',
+            estimated_people INTEGER NOT NULL DEFAULT 1,
+            budget_cents INTEGER NOT NULL DEFAULT 0 CHECK(budget_cents >= 0),
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','planning','pending','published','ended','archived')),
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            published_at TEXT,
+            archived_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_plans_group ON travel_plans(group_id, updated_at);
+        CREATE TABLE IF NOT EXISTS travel_places (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES travel_plans(id) ON DELETE CASCADE,
+            type TEXT NOT NULL DEFAULT 'other',
+            name TEXT NOT NULL,
+            address TEXT NOT NULL DEFAULT '',
+            lat REAL NOT NULL,
+            lng REAL NOT NULL,
+            provider_place_id TEXT NOT NULL DEFAULT '',
+            opening_hours TEXT NOT NULL DEFAULT '',
+            avg_cost REAL,
+            phone TEXT NOT NULL DEFAULT '',
+            rating REAL,
+            must_visit INTEGER NOT NULL DEFAULT 0,
+            note TEXT NOT NULL DEFAULT '',
+            image_url TEXT NOT NULL DEFAULT '',
+            created_by INTEGER NOT NULL REFERENCES users(id),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_places_plan ON travel_places(plan_id, id);
+        CREATE TABLE IF NOT EXISTS travel_place_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES travel_plans(id) ON DELETE CASCADE,
+            place_id INTEGER NOT NULL REFERENCES travel_places(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            suggestion TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(plan_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_place_votes_place ON travel_place_votes(place_id);
+        CREATE TABLE IF NOT EXISTS travel_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES travel_plans(id) ON DELETE CASCADE,
+            travel_date TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            start_at TEXT,
+            end_at TEXT,
+            start_place_id INTEGER REFERENCES travel_places(id) ON DELETE SET NULL,
+            end_place_id INTEGER REFERENCES travel_places(id) ON DELETE SET NULL,
+            transport TEXT NOT NULL DEFAULT 'drive',
+            budget_cents INTEGER NOT NULL DEFAULT 0 CHECK(budget_cents >= 0),
+            notes TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','confirmed')),
+            total_distance_km REAL NOT NULL DEFAULT 0 CHECK(total_distance_km >= 0),
+            total_duration_min INTEGER NOT NULL DEFAULT 0 CHECK(total_duration_min >= 0),
+            route_score REAL,
+            activity_id INTEGER REFERENCES activities(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(plan_id, travel_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_days_plan ON travel_days(plan_id, travel_date);
+        CREATE TABLE IF NOT EXISTS travel_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_id INTEGER NOT NULL REFERENCES travel_days(id) ON DELETE CASCADE,
+            place_id INTEGER NOT NULL REFERENCES travel_places(id) ON DELETE CASCADE,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            arrival_at TEXT,
+            stay_minutes INTEGER NOT NULL DEFAULT 60 CHECK(stay_minutes >= 0),
+            depart_at TEXT,
+            transport TEXT,
+            distance_km REAL NOT NULL DEFAULT 0 CHECK(distance_km >= 0),
+            duration_min INTEGER NOT NULL DEFAULT 0 CHECK(duration_min >= 0),
+            confirmed INTEGER NOT NULL DEFAULT 1,
+            opening_conflict INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(day_id, sort_order)
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_nodes_day ON travel_nodes(day_id, sort_order);
+        CREATE TABLE IF NOT EXISTS travel_member_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES travel_plans(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            lat REAL,
+            lng REAL,
+            address TEXT NOT NULL DEFAULT '',
+            participating INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(plan_id, user_id),
+            CHECK((participating = 0) OR (lat IS NOT NULL AND lng IS NOT NULL))
+        );
+        CREATE INDEX IF NOT EXISTS idx_travel_locations_plan ON travel_member_locations(plan_id);
         """
     )
     add_column(connection, "activities", "location_id INTEGER")
     add_column(connection, "activities", "budget_per_person REAL")
+    backfill_expense_records(connection)
     connection.execute("UPDATE memberships SET role = 'member' WHERE role = 'temporary'")
     rows = connection.execute("SELECT id, color FROM groups_table WHERE invite_code IS NULL").fetchall()
     for row in rows:
@@ -375,6 +634,101 @@ def migrate_group_schema(connection: sqlite3.Connection) -> None:
             "UPDATE groups_table SET invite_code = ?, invite_expires_at = ?, theme_color = ? WHERE id = ?",
             (secrets.token_hex(4).upper(), (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), row["color"], row["id"]),
         )
+
+
+def expense_rows_from_result(result: dict, fallback_title: str, fallback_date: str) -> list[dict]:
+    bill = result.get("bill") or {}
+    raw_receipts = bill.get("receipts") or (result.get("raw_analysis") or {}).get("receipts") or []
+    receipts = [row for row in raw_receipts if isinstance(row, dict)]
+    total_cents = int(bill.get("total_cents") or 0)
+    if not receipts and total_cents > 0:
+        receipts = [{"receipt_index": 1, "merchant": fallback_title, "total_cents": total_cents}]
+    receipt_total = sum(max(0, int(row.get("total_cents") or 0)) for row in receipts)
+    if len(receipts) > 1 and total_cents > 0 and receipt_total != total_cents:
+        if receipt_total > 0:
+            normalized = [total_cents * max(0, int(row.get("total_cents") or 0)) // receipt_total for row in receipts]
+            normalized[max(range(len(normalized)), key=lambda index: normalized[index])] += total_cents - sum(normalized)
+        else:
+            normalized = [total_cents // len(receipts) for _ in receipts]
+            normalized[0] += total_cents - sum(normalized)
+        receipts = [{**row, "total_cents": normalized[index]} for index, row in enumerate(receipts)]
+    bill_category = str(bill.get("category") or "其他")
+    items = [row for row in (bill.get("items") or []) if isinstance(row, dict)]
+    spent_at = str(bill.get("bill_date") or fallback_date)[:10]
+    try:
+        datetime.strptime(spent_at, "%Y-%m-%d")
+    except ValueError:
+        spent_at = fallback_date[:10]
+    records = []
+    used_receipt_indices: set[int] = set()
+    for position, receipt in enumerate(receipts, start=1):
+        receipt_index = int(receipt.get("receipt_index") or position)
+        if receipt_index <= 0 or receipt_index in used_receipt_indices:
+            receipt_index = position
+            while receipt_index in used_receipt_indices:
+                receipt_index += 1
+        used_receipt_indices.add(receipt_index)
+        amount_cents = int(receipt.get("total_cents") or 0)
+        if amount_cents <= 0 and len(receipts) == 1:
+            amount_cents = total_cents
+        if amount_cents <= 0:
+            continue
+        breakdown: dict[str, int] = {}
+        for item in items:
+            if int(item.get("receipt_index") or 1) != receipt_index:
+                continue
+            category = str(item.get("category") or bill_category)
+            breakdown[category] = breakdown.get(category, 0) + int(item.get("amount_cents") or 0)
+        categorized = sum(breakdown.values())
+        if categorized < amount_cents:
+            breakdown[bill_category] = breakdown.get(bill_category, 0) + amount_cents - categorized
+        elif categorized > amount_cents and categorized:
+            # OCR adjustments can make item totals differ by a few cents; scale them back to the receipt total.
+            scaled = {key: amount_cents * value // categorized for key, value in breakdown.items()}
+            remainder = amount_cents - sum(scaled.values())
+            if scaled:
+                largest = max(scaled, key=scaled.get)
+                scaled[largest] += remainder
+            breakdown = scaled
+        primary_category = max(breakdown, key=breakdown.get) if breakdown else bill_category
+        records.append({
+            "receipt_index": receipt_index,
+            "merchant_name": str(receipt.get("merchant") or fallback_title),
+            "category": primary_category,
+            "category_breakdown": breakdown or {bill_category: amount_cents},
+            "amount_cents": amount_cents,
+            "spent_at": spent_at,
+        })
+    return records
+
+
+def persist_expense_records(connection: sqlite3.Connection, bill_id: int, group_id: int, result: dict, title: str, created_at: str) -> None:
+    for record in expense_rows_from_result(result, title, created_at):
+        connection.execute(
+            """INSERT OR IGNORE INTO expense_records(
+                bill_id, group_id, receipt_index, merchant_name, category,
+                category_breakdown, amount_cents, spent_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                bill_id, group_id, record["receipt_index"], record["merchant_name"],
+                record["category"], json.dumps(record["category_breakdown"], ensure_ascii=False),
+                record["amount_cents"], record["spent_at"],
+            ),
+        )
+
+
+def backfill_expense_records(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """SELECT ai_bills.id, ai_bills.group_id, ai_bills.title, ai_bills.result_json,
+        ai_bills.created_at FROM ai_bills
+        WHERE NOT EXISTS (SELECT 1 FROM expense_records WHERE bill_id = ai_bills.id)"""
+    ).fetchall()
+    for row in rows:
+        try:
+            result = json.loads(row["result_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        persist_expense_records(connection, row["id"], row["group_id"], result, row["title"], row["created_at"])
 
 
 def audit(
@@ -444,6 +798,285 @@ def ensure_demo_members(connection: sqlite3.Connection, owner_id: int) -> None:
             connection.execute(
                 "INSERT OR IGNORE INTO memberships(group_id, user_id, role) VALUES (?, ?, 'member')",
                 (group["id"], member_ids[username]),
+            )
+
+
+def showcase_seed_enabled() -> bool:
+    """Keep demo showcase rows out of isolated test databases.
+
+    The normal local database is seeded automatically.  Deployments using a
+    custom database path can opt in with SYNCMATE_SEED_SHOWCASE_DATA=1.
+    """
+    flag = os.environ.get("SYNCMATE_SEED_SHOWCASE_DATA", "")
+    if flag.lower() in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        return DB_PATH.resolve() == (BASE_DIR / "syncmate.db").resolve()
+    except OSError:
+        return False
+
+
+def ensure_demo_showcase_data(connection: sqlite3.Connection, owner_id: int) -> None:
+    """Create one coherent, idempotent dataset for product demonstrations.
+
+    All rows are real records in the same tables used by the UI and APIs, so
+    activities, calendar entries, travel routes, AI bills and finance maps
+    remain consistent.  The function intentionally does nothing for test DBs.
+    """
+    if not showcase_seed_enabled():
+        return
+    groups = {
+        row["name"]: int(row["id"])
+        for row in connection.execute(
+            "SELECT id, name FROM groups_table WHERE owner_id = ? AND is_dissolved = 0", (owner_id,)
+        ).fetchall()
+    }
+    weekend_id = groups.get("周末聚餐")
+    travel_group_id = groups.get("海边两日游")
+    if not weekend_id or not travel_group_id:
+        return
+    member_ids = {
+        row["username"]: int(row["id"])
+        for row in connection.execute(
+            "SELECT id, username FROM users WHERE username IN ('member_lin','member_zhou','member_wang','member_fang','member_jia')"
+        ).fetchall()
+    }
+    travel_members = [owner_id, member_ids.get("member_lin"), member_ids.get("member_zhou")]
+    travel_members = [int(value) for value in travel_members if value]
+    today = datetime.now(timezone.utc).date()
+    trip_start = today + timedelta(days=7)
+    trip_end = trip_start + timedelta(days=1)
+
+    # A fixed activity and a completed location/time poll, both visible in the
+    # group and in every member's calendar.
+    fixed_title = "周末城市漫步 · 演示活动"
+    fixed = connection.execute(
+        "SELECT id FROM activities WHERE group_id = ? AND title = ?", (weekend_id, fixed_title)
+    ).fetchone()
+    if not fixed:
+        cursor = connection.execute(
+            """INSERT INTO activities(
+                group_id, creator_id, title, description, mode, status, start_at, end_at,
+                form, notice, published_at, budget_per_person
+            ) VALUES (?, ?, ?, ?, 'fixed', 'published', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)""",
+            (
+                weekend_id, owner_id, fixed_title,
+                "一起逛展、吃饭和散步，所有成员都可以查看。",
+                f"{trip_start.isoformat()}T10:00", f"{trip_start.isoformat()}T18:00",
+                "城市漫步", "请提前 10 分钟到达集合点", 120.0,
+            ),
+        )
+        fixed_id = cursor.lastrowid
+        location_cursor = connection.execute(
+            """INSERT INTO activity_locations(
+                activity_id, name, address, lat, lng, budget_per_person, opening_hours, sort_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+            (fixed_id, "人民广场集合点", "上海市黄浦区人民广场", 31.2304, 121.4737, 120.0, "09:00-22:00"),
+        )
+        connection.execute("UPDATE activities SET location_id = ? WHERE id = ?", (location_cursor.lastrowid, fixed_id))
+        connection.executemany(
+            "INSERT INTO activity_items(activity_id, title, start_at, end_at, note, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (fixed_id, "上海博物馆参观", f"{trip_start.isoformat()}T10:00", f"{trip_start.isoformat()}T12:00", "提前预约入场", 0),
+                (fixed_id, "午餐 AA", f"{trip_start.isoformat()}T12:30", f"{trip_start.isoformat()}T14:00", "餐费按实际账单分摊", 1),
+                (fixed_id, "人民公园散步", f"{trip_start.isoformat()}T15:00", f"{trip_start.isoformat()}T18:00", "以群消息为准", 2),
+            ],
+        )
+
+    poll_title = "周末电影与晚餐 · 已确认"
+    poll = connection.execute(
+        "SELECT id FROM activities WHERE group_id = ? AND title = ?", (weekend_id, poll_title)
+    ).fetchone()
+    if not poll:
+        cursor = connection.execute(
+            """INSERT INTO activities(
+                group_id, creator_id, title, description, mode, status, start_at, end_at,
+                form, notice, published_at, budget_per_person
+            ) VALUES (?, ?, ?, ?, 'poll', 'published', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)""",
+            (
+                weekend_id, owner_id, poll_title, "由成员投票后确定的示例活动。",
+                f"{(trip_start + timedelta(days=1)).isoformat()}T14:00", f"{(trip_start + timedelta(days=1)).isoformat()}T21:00",
+                "电影+晚餐", "投票结果已确认，缺席成员请提前在群内说明", 180.0,
+            ),
+        )
+        poll_id = cursor.lastrowid
+        location_rows = []
+        for index, location in enumerate([
+            ("百丽宫影城", "上海市黄浦区西藏中路", 31.2336, 121.4755, 180.0, "10:00-23:00"),
+            ("大光明电影院", "上海市黄浦区南京西路", 31.2328, 121.4688, 160.0, "09:30-22:30"),
+        ]):
+            location_rows.append(
+                connection.execute(
+                    """INSERT INTO activity_locations(
+                        activity_id, name, address, lat, lng, budget_per_person, opening_hours, sort_order
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (poll_id, *location, index),
+                ).lastrowid
+            )
+        slot_rows = []
+        for index, (start, end, suggestion) in enumerate([
+            (f"{(trip_start + timedelta(days=1)).isoformat()}T14:00", f"{(trip_start + timedelta(days=1)).isoformat()}T17:00", "下午场"),
+            (f"{(trip_start + timedelta(days=1)).isoformat()}T16:00", f"{(trip_start + timedelta(days=1)).isoformat()}T19:00", "傍晚场"),
+        ]):
+            slot_rows.append(
+                connection.execute(
+                    "INSERT INTO activity_slots(activity_id, start_at, end_at, suggestion, sort_order) VALUES (?, ?, ?, ?, ?)",
+                    (poll_id, start, end, suggestion, index),
+                ).lastrowid
+            )
+        poll_members = [owner_id, *[value for value in member_ids.values() if value]]
+        for index, user_id in enumerate(sorted(set(poll_members))):
+            selected_slot = slot_rows[index % len(slot_rows)]
+            for slot_id in slot_rows:
+                connection.execute(
+                    "INSERT INTO activity_votes(activity_id, slot_id, user_id, available, suggestion) VALUES (?, ?, ?, ?, ?)",
+                    (poll_id, slot_id, user_id, int(slot_id == selected_slot), "时间可以参加" if slot_id == selected_slot else "该时段不便"),
+                )
+            connection.execute(
+                "INSERT INTO activity_location_votes(activity_id, location_id, user_id, suggestion) VALUES (?, ?, ?, ?)",
+                (poll_id, location_rows[index % len(location_rows)], user_id, "希望交通方便"),
+            )
+        connection.execute(
+            "INSERT INTO activity_items(activity_id, title, start_at, end_at, note, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            (poll_id, "电影观影", f"{(trip_start + timedelta(days=1)).isoformat()}T16:00", f"{(trip_start + timedelta(days=1)).isoformat()}T19:00", "最终选择百丽宫影城", 0),
+        )
+        connection.execute(
+            "INSERT INTO activity_items(activity_id, title, start_at, end_at, note, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            (poll_id, "聚餐交流", f"{(trip_start + timedelta(days=1)).isoformat()}T19:30", f"{(trip_start + timedelta(days=1)).isoformat()}T21:00", "以群内通知为准", 1),
+        )
+        connection.execute("UPDATE activities SET location_id = ? WHERE id = ?", (location_rows[0], poll_id))
+
+    # A published two-day route in the travel group.  Its route nodes and
+    # linked activities are the exact source consumed by the calendar view.
+    plan_name = "上海周末文化之旅 · 演示路线"
+    plan = connection.execute(
+        "SELECT id FROM travel_plans WHERE group_id = ? AND name = ?", (travel_group_id, plan_name)
+    ).fetchone()
+    if not plan:
+        plan_id = connection.execute(
+            """INSERT INTO travel_plans(
+                group_id, creator_id, name, destination, start_date, end_date,
+                departure_city, default_start_point, default_transport, estimated_people,
+                budget_cents, status, notes, published_at
+            ) VALUES (?, ?, ?, '上海', ?, ?, '杭州', '上海虹桥站', 'metro', ?, ?, 'published', ?, CURRENT_TIMESTAMP)""",
+            (travel_group_id, owner_id, plan_name, trip_start.isoformat(), trip_end.isoformat(), len(travel_members), 360000, "路线、预算和共享日程已确认"),
+        ).lastrowid
+        place_specs = [
+            ("hotel", "浦东精品酒店", "上海市浦东新区陆家嘴", 31.2397, 121.4998, 350.0, 4.6, 0),
+            ("attraction", "外滩", "上海市黄浦区中山东一路", 31.2397, 121.4998, 0.0, 4.8, 1),
+            ("attraction", "豫园", "上海市黄浦区豫园老街", 31.2271, 121.4920, 60.0, 4.7, 1),
+            ("restaurant", "本帮菜餐厅", "上海市黄浦区福州路", 31.2324, 121.4749, 120.0, 4.5, 1),
+            ("attraction", "朱家角古镇", "上海市青浦区朱家角镇", 31.1070, 121.0560, 80.0, 4.6, 1),
+            ("attraction", "西岸艺术中心", "上海市徐汇区龙兰路", 31.1788, 121.4580, 40.0, 4.4, 1),
+        ]
+        place_ids = {}
+        for place_type, name, address, lat, lng, avg_cost, rating, must_visit in place_specs:
+            place_ids[name] = connection.execute(
+                """INSERT INTO travel_places(
+                    plan_id, type, name, address, lat, lng, avg_cost, rating, must_visit, note, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (plan_id, place_type, name, address, lat, lng, avg_cost, rating, must_visit, "演示数据，可直接编辑", owner_id),
+            ).lastrowid
+        day_specs = [
+            (trip_start.isoformat(), "外滩与豫园", f"{trip_start.isoformat()}T09:00", f"{trip_start.isoformat()}T21:00", [
+                ("外滩", f"{trip_start.isoformat()}T10:00", 120, f"{trip_start.isoformat()}T12:00", 0.0, 0),
+                ("豫园", f"{trip_start.isoformat()}T13:30", 120, f"{trip_start.isoformat()}T15:30", 3.2, 18),
+                ("本帮菜餐厅", f"{trip_start.isoformat()}T18:00", 90, f"{trip_start.isoformat()}T19:30", 2.4, 14),
+            ], "浦东精品酒店", "浦东精品酒店", 90000),
+            (trip_end.isoformat(), "朱家角与艺术之旅", f"{trip_end.isoformat()}T08:30", f"{trip_end.isoformat()}T20:00", [
+                ("朱家角古镇", f"{trip_end.isoformat()}T10:00", 180, f"{trip_end.isoformat()}T13:00", 42.0, 65),
+                ("西岸艺术中心", f"{trip_end.isoformat()}T16:00", 120, f"{trip_end.isoformat()}T18:00", 38.0, 58),
+            ], "浦东精品酒店", "浦东精品酒店", 80000),
+        ]
+        for travel_date, title, start_at, end_at, nodes, start_name, end_name, budget_cents in day_specs:
+            day_id = connection.execute(
+                """INSERT INTO travel_days(
+                    plan_id, travel_date, title, start_at, end_at, start_place_id, end_place_id,
+                    transport, budget_cents, notes, status, total_distance_km, total_duration_min,
+                    route_score
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'metro', ?, ?, 'confirmed', ?, ?, 94.0)""",
+                (plan_id, travel_date, title, start_at, end_at, place_ids[start_name], place_ids[end_name], budget_cents, "已确认路线", sum(node[4] for node in nodes), sum(node[2] for node in nodes) + 45 * max(0, len(nodes) - 1) + 30),
+            ).lastrowid
+            for sort_order, (name, arrival_at, stay_minutes, depart_at, distance_km, duration_min) in enumerate(nodes):
+                connection.execute(
+                    """INSERT INTO travel_nodes(
+                        day_id, place_id, sort_order, arrival_at, stay_minutes, depart_at,
+                        transport, distance_km, duration_min, confirmed, opening_conflict
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'metro', ?, ?, 1, 0)""",
+                    (day_id, place_ids[name], sort_order, arrival_at, stay_minutes, depart_at, distance_km, duration_min),
+                )
+            activity_id = connection.execute(
+                """INSERT INTO activities(
+                    group_id, creator_id, title, description, mode, status, start_at, end_at,
+                    form, notice, published_at
+                ) VALUES (?, ?, ?, '旅行路线已同步', 'fixed', 'published', ?, ?, '旅行路线', ?, CURRENT_TIMESTAMP)""",
+                (travel_group_id, owner_id, f"{plan_name} · {travel_date}", start_at, end_at, "已同步旅行路线"),
+            ).lastrowid
+            for sort_order, (name, arrival_at, stay_minutes, depart_at, _distance_km, _duration_min) in enumerate(nodes):
+                connection.execute(
+                    "INSERT INTO activity_items(activity_id, title, start_at, end_at, note, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+                    (activity_id, name, arrival_at, depart_at, f"停留 {stay_minutes} 分钟", sort_order),
+                )
+            connection.execute("UPDATE travel_days SET activity_id = ? WHERE id = ?", (activity_id, day_id))
+
+    # One active AI bill gives the finance map and wallet a real, cross-module
+    # record.  Its receipts use current/previous months and actual coordinates.
+    bill_title = "上海旅行共同支出 · 演示账单"
+    if not connection.execute("SELECT 1 FROM ai_bills WHERE group_id = ? AND title = ?", (travel_group_id, bill_title)).fetchone():
+        payer_total = 138000
+        participants = [{"user_id": user_id, "amount_cents": payer_total // len(travel_members)} for user_id in travel_members]
+        participants[-1]["amount_cents"] += payer_total - sum(item["amount_cents"] for item in participants)
+        transfers = [
+            {"from_user_id": user_id, "to_user_id": owner_id, "amount_cents": item["amount_cents"]}
+            for user_id, item in [(member_id, next(item for item in participants if item["user_id"] == member_id)) for member_id in travel_members if member_id != owner_id]
+        ]
+        first_of_month = today.replace(day=1)
+        previous_date = (first_of_month - timedelta(days=1)).replace(day=15)
+        current_date = today.replace(day=max(1, min(today.day, 25)))
+        result = {
+            "version": "1.0", "status": "ok",
+            "bill": {
+                "title": bill_title, "category": "旅行", "bill_date": current_date.isoformat(),
+                "currency": "CNY", "total_cents": payer_total, "subtotal_cents": payer_total,
+                "payers": [{"user_id": owner_id, "amount_cents": payer_total}],
+                "participants": participants,
+                "items": [
+                    {"name": "本帮菜午餐", "amount_cents": 68000, "participant_ids": travel_members, "receipt_index": 1, "claim_mode": "shared", "category": "餐饮"},
+                    {"name": "景点门票", "amount_cents": 40000, "participant_ids": travel_members, "receipt_index": 2, "claim_mode": "shared", "category": "门票"},
+                    {"name": "酒店预订", "amount_cents": 30000, "participant_ids": travel_members, "receipt_index": 3, "claim_mode": "shared", "category": "住宿"},
+                ],
+                "receipts": [
+                    {"receipt_index": 1, "merchant": "本帮菜餐厅", "total_cents": 68000},
+                    {"receipt_index": 2, "merchant": "朱家角古镇", "total_cents": 40000},
+                    {"receipt_index": 3, "merchant": "浦东精品酒店", "total_cents": 30000},
+                ],
+                "split_method": "equal", "ai_generated": True, "requires_confirmation": True, "actual_payer_id": owner_id,
+            },
+            "transfers": transfers,
+            "explanation": "旅行共同支出按参加成员平均分摊，群主先行垫付。",
+            "raw_analysis": {"demo": True},
+        }
+        bill_id = connection.execute(
+            "INSERT INTO ai_bills(group_id, creator_id, title, instruction, result_json, status) VALUES (?, ?, ?, ?, ?, 'active')",
+            (travel_group_id, owner_id, bill_title, "旅行期间共同支出按参加成员 AA", json.dumps(result, ensure_ascii=False)),
+        ).lastrowid
+        for transfer in transfers:
+            connection.execute(
+                "INSERT INTO ai_bill_transfers(bill_id, from_user_id, to_user_id, amount_cents, status) VALUES (?, ?, ?, ?, 'pending')",
+                (bill_id, transfer["from_user_id"], transfer["to_user_id"], transfer["amount_cents"]),
+            )
+        expense_specs = [
+            (1, "本帮菜餐厅", "餐饮", {"餐饮": 68000}, 68000, current_date.isoformat(), "本帮菜餐厅", "上海市黄浦区福州路", 31.2324, 121.4749),
+            (2, "朱家角古镇", "门票", {"门票": 40000}, 40000, current_date.isoformat(), "朱家角古镇", "上海市青浦区朱家角镇", 31.1070, 121.0560),
+            (3, "浦东精品酒店", "住宿", {"住宿": 30000}, 30000, previous_date.isoformat(), "浦东精品酒店", "上海市浦东新区陆家嘴", 31.2397, 121.4998),
+        ]
+        for receipt_index, merchant, category, breakdown, amount_cents, spent_at, location_name, address, lat, lng in expense_specs:
+            connection.execute(
+                """INSERT INTO expense_records(
+                    bill_id, group_id, receipt_index, merchant_name, category, category_breakdown,
+                    amount_cents, spent_at, location_name, address, lat, lng
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (bill_id, travel_group_id, receipt_index, merchant, category, json.dumps(breakdown, ensure_ascii=False), amount_cents, spent_at, location_name, address, lat, lng),
             )
 
 
@@ -530,6 +1163,7 @@ def initialize_database() -> None:
         demo = connection.execute("SELECT id FROM users WHERE username = 'demo'").fetchone()
         if demo:
             ensure_demo_members(connection, demo["id"])
+            ensure_demo_showcase_data(connection, demo["id"])
             return
         cursor = connection.execute(
             "INSERT INTO users(username, password_hash, nickname, avatar_color) VALUES (?, ?, ?, ?)",
@@ -553,6 +1187,7 @@ def initialize_database() -> None:
                 (group_cursor.lastrowid, user_id),
             )
         ensure_demo_members(connection, user_id)
+        ensure_demo_showcase_data(connection, user_id)
         connection.executemany(
             "INSERT INTO bills(group_id, title, amount, payer_id, status) VALUES (?, ?, ?, ?, ?)",
             [
@@ -1012,13 +1647,37 @@ def search_locations(q: str, user: sqlite3.Row = Depends(current_user)) -> list[
     query = q.strip()
     if len(query) < 2:
         return []
+    headers = {"User-Agent": "SyncMate/1.0 location search"}
+    # Photon is an OpenStreetMap-backed geocoder with a permissive public API.
+    # Keep Nominatim as a fallback because availability varies by network.
     try:
-        response = httpx.get("https://nominatim.openstreetmap.org/search", params={"q": query, "format": "jsonv2", "limit": 6, "accept-language": "zh-CN"}, headers={"User-Agent": "SyncMate/1.0 location search"}, timeout=12)
+        # Photon currently rejects `lang=zh`; omit it and preserve the source
+        # names/addresses returned by OpenStreetMap instead.
+        response = httpx.get("https://photon.komoot.io/api/", params={"q": query, "limit": 6}, headers=headers, timeout=8)
+        response.raise_for_status()
+        features = response.json().get("features", [])
+        results = []
+        for feature in features:
+            geometry = feature.get("geometry") or {}
+            coordinates = geometry.get("coordinates") or []
+            properties = feature.get("properties") or {}
+            if len(coordinates) < 2:
+                continue
+            name = properties.get("name") or properties.get("street") or query
+            address_parts = [properties.get(key) for key in ("street", "housenumber", "district", "city", "state", "country")]
+            address = ", ".join(str(part) for part in address_parts if part) or name
+            results.append({"name": name, "address": address, "lat": float(coordinates[1]), "lng": float(coordinates[0])})
+        if results:
+            return results
+    except (httpx.HTTPError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        response = httpx.get("https://nominatim.openstreetmap.org/search", params={"q": query, "format": "jsonv2", "limit": 6, "accept-language": "zh-CN"}, headers=headers, timeout=8)
         response.raise_for_status()
         rows = response.json()
-    except (httpx.HTTPError, ValueError) as error:
-        raise HTTPException(status_code=502, detail="地图地点搜索暂时不可用") from error
-    return [{"name": row.get("display_name", "").split(",")[0] or query, "address": row.get("display_name", ""), "lat": float(row["lat"]), "lng": float(row["lon"])} for row in rows if row.get("lat") and row.get("lon")]
+        return [{"name": row.get("display_name", "").split(",")[0] or query, "address": row.get("display_name", ""), "lat": float(row["lat"]), "lng": float(row["lon"])} for row in rows if row.get("lat") and row.get("lon")]
+    except (httpx.HTTPError, ValueError, TypeError, KeyError) as error:
+        raise HTTPException(status_code=502, detail="地图地点搜索暂时不可用，请检查网络或直接在地图上点选") from error
 
 
 @app.post("/api/groups/{group_id}/location")
@@ -1175,6 +1834,9 @@ def ai_bill_json(connection: sqlite3.Connection, row: sqlite3.Row, user_id: int)
         "my_payment_status": my_payment_status,
         "my_transfers": my_transfers,
         "all_transfers_completed": bool(transfer_payload) and all(item["status"] == "completed" for item in transfer_payload),
+        "expense_records": [dict(item) for item in connection.execute(
+            "SELECT * FROM expense_records WHERE bill_id = ? ORDER BY receipt_index, id", (row["id"],)
+        ).fetchall()],
     })
     return payload
 
@@ -1209,6 +1871,12 @@ async def analyze_ai_bill(
     files: list[UploadFile] = File(...),
     user: sqlite3.Row = Depends(current_user),
 ) -> dict:
+    if not instruction.strip():
+        raise HTTPException(status_code=422, detail="请填写分账规则后再开始分析")
+    if not files:
+        raise HTTPException(status_code=422, detail="请至少上传一张小票图片")
+    if len(files) > 8:
+        raise HTTPException(status_code=422, detail="最多支持上传 8 张小票图片")
     skill = load_receipt_helper()
     with db() as connection:
         membership(connection, group_id, user["id"])
@@ -1233,6 +1901,8 @@ async def analyze_ai_bill(
     with db() as connection:
         cursor = connection.execute("INSERT INTO ai_bills(group_id, creator_id, title, instruction, result_json) VALUES (?, ?, ?, ?, ?)", (group_id, user["id"], result["bill"]["title"], instruction.strip(), json.dumps(result, ensure_ascii=False)))
         bill_id = cursor.lastrowid
+        created_at = connection.execute("SELECT created_at FROM ai_bills WHERE id = ?", (bill_id,)).fetchone()["created_at"]
+        persist_expense_records(connection, bill_id, group_id, result, result["bill"]["title"], created_at)
         for transfer in result["transfers"]:
             connection.execute("INSERT INTO ai_bill_transfers(bill_id, from_user_id, to_user_id, amount_cents) VALUES (?, ?, ?, ?)", (bill_id, transfer["from_user_id"], transfer["to_user_id"], transfer["amount_cents"]))
         row = connection.execute("SELECT * FROM ai_bills WHERE id = ?", (bill_id,)).fetchone()
@@ -1275,6 +1945,199 @@ def list_my_ai_bills(user: sqlite3.Row = Depends(current_user)) -> list[dict]:
                 record["workflow_status"] = "active"
             records.append(record)
         return records
+
+
+def previous_month(month: str) -> str:
+    parsed = datetime.strptime(month, "%Y-%m")
+    return f"{parsed.year - 1}-12" if parsed.month == 1 else f"{parsed.year}-{parsed.month - 1:02d}"
+
+
+def category_amount(row: sqlite3.Row, category: str | None) -> int:
+    if not category:
+        return int(row["amount_cents"])
+    try:
+        breakdown = json.loads(row["category_breakdown"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        breakdown = {}
+    return int(breakdown.get(category) or (row["amount_cents"] if row["category"] == category else 0))
+
+
+@app.get("/api/finance/analytics")
+def finance_analytics(
+    month: str | None = None,
+    group_id: int | None = None,
+    category: str | None = None,
+    user: sqlite3.Row = Depends(current_user),
+) -> dict:
+    selected_month = month or datetime.now(timezone.utc).strftime("%Y-%m")
+    try:
+        datetime.strptime(selected_month, "%Y-%m")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="月份格式应为 YYYY-MM") from error
+    previous = previous_month(selected_month)
+    with db() as connection:
+        groups = connection.execute(
+            """SELECT groups_table.id, groups_table.name, groups_table.color
+            FROM groups_table JOIN memberships ON memberships.group_id = groups_table.id
+            WHERE memberships.user_id = ? AND groups_table.is_dissolved = 0
+            ORDER BY groups_table.name""", (user["id"],),
+        ).fetchall()
+        allowed_group_ids = {int(row["id"]) for row in groups}
+        if group_id is not None and group_id not in allowed_group_ids:
+            raise HTTPException(status_code=403, detail="你不在该群组中")
+        parameters: list[object] = [user["id"]]
+        group_clause = ""
+        if group_id is not None:
+            group_clause = " AND expense_records.group_id = ?"
+            parameters.append(group_id)
+        rows = connection.execute(
+            f"""SELECT expense_records.*, groups_table.name AS group_name, ai_bills.status AS bill_status
+            FROM expense_records
+            JOIN ai_bills ON ai_bills.id = expense_records.bill_id
+            JOIN groups_table ON groups_table.id = expense_records.group_id
+            JOIN memberships ON memberships.group_id = expense_records.group_id AND memberships.user_id = ?
+            WHERE groups_table.is_dissolved = 0 AND ai_bills.status IN ('active', 'archived')
+            {group_clause}
+            ORDER BY expense_records.spent_at DESC, expense_records.id DESC""", parameters,
+        ).fetchall()
+
+    all_categories: set[str] = set()
+    for row in rows:
+        try:
+            all_categories.update(str(key) for key, value in json.loads(row["category_breakdown"] or "{}").items() if int(value or 0) > 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            all_categories.add(row["category"])
+    current_rows = [(row, category_amount(row, category)) for row in rows if str(row["spent_at"])[:7] == selected_month]
+    previous_rows = [(row, category_amount(row, category)) for row in rows if str(row["spent_at"])[:7] == previous]
+    current_rows = [(row, amount) for row, amount in current_rows if amount > 0]
+    previous_rows = [(row, amount) for row, amount in previous_rows if amount > 0]
+    current_total = sum(amount for _, amount in current_rows)
+    previous_total = sum(amount for _, amount in previous_rows)
+    change_percent = None if previous_total == 0 else round((current_total - previous_total) / previous_total * 100, 1)
+
+    group_totals: dict[int, dict] = {
+        int(row["id"]): {"group_id": row["id"], "group_name": row["name"], "current_cents": 0, "previous_cents": 0}
+        for row in groups if group_id is None or int(row["id"]) == group_id
+    }
+    for period_key, period_rows in (("current_cents", current_rows), ("previous_cents", previous_rows)):
+        for row, amount in period_rows:
+            if int(row["group_id"]) in group_totals:
+                group_totals[int(row["group_id"])][period_key] += amount
+    max_group = max((entry["current_cents"] for entry in group_totals.values()), default=0)
+    group_heatmap = []
+    for entry in sorted(group_totals.values(), key=lambda item: item["current_cents"], reverse=True):
+        entry["intensity"] = round(entry["current_cents"] / max_group, 4) if max_group else 0
+        group_heatmap.append(entry)
+
+    category_week_totals: dict[str, list[int]] = {}
+    for row, _ in current_rows:
+        try:
+            breakdown = json.loads(row["category_breakdown"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            breakdown = {row["category"]: row["amount_cents"]}
+        week = min(4, max(0, (int(str(row["spent_at"])[8:10]) - 1) // 7))
+        for name, raw_amount in breakdown.items():
+            if category and name != category:
+                continue
+            category_week_totals.setdefault(str(name), [0, 0, 0, 0, 0])[week] += int(raw_amount or 0)
+    max_category_cell = max((max(values) for values in category_week_totals.values()), default=0)
+    category_heatmap = [
+        {
+            "category": name,
+            "total_cents": sum(values),
+            "weeks": [
+                {"week": index + 1, "amount_cents": amount, "intensity": round(amount / max_category_cell, 4) if max_category_cell else 0}
+                for index, amount in enumerate(values)
+            ],
+        }
+        for name, values in sorted(category_week_totals.items(), key=lambda item: sum(item[1]), reverse=True)
+    ]
+
+    merchants: dict[str, dict] = {}
+    for row, amount in current_rows:
+        merchant = row["merchant_name"] or row["location_name"] or "未识别商户"
+        target = merchants.setdefault(merchant, {"merchant": merchant, "amount_cents": 0, "count": 0, "group_names": set()})
+        target["amount_cents"] += amount
+        target["count"] += 1
+        target["group_names"].add(row["group_name"])
+    merchant_ranking = []
+    for entry in sorted(merchants.values(), key=lambda item: item["amount_cents"], reverse=True)[:10]:
+        merchant_ranking.append({**entry, "group_names": sorted(entry["group_names"])})
+
+    def point_payload(period_rows: list[tuple[sqlite3.Row, int]]) -> list[dict]:
+        return [
+            {
+                "expense_id": row["id"], "bill_id": row["bill_id"], "group_id": row["group_id"],
+                "group_name": row["group_name"], "merchant": row["merchant_name"], "category": category or row["category"],
+                "amount_cents": amount, "spent_at": row["spent_at"], "location_name": row["location_name"],
+                "address": row["address"], "lat": row["lat"], "lng": row["lng"],
+            }
+            for row, amount in period_rows if row["lat"] is not None and row["lng"] is not None
+        ]
+
+    current_points = point_payload(current_rows)
+    previous_points = point_payload(previous_rows)
+    areas: dict[str, dict] = {}
+    for key, points in (("current_cents", current_points), ("previous_cents", previous_points)):
+        for point in points:
+            area_key = f"{float(point['lat']):.2f},{float(point['lng']):.2f}"
+            target = areas.setdefault(area_key, {
+                "area_key": area_key, "name": point["location_name"] or point["address"] or point["merchant"],
+                "lat": point["lat"], "lng": point["lng"], "current_cents": 0, "previous_cents": 0,
+            })
+            target[key] += point["amount_cents"]
+    area_comparison = []
+    for area in sorted(areas.values(), key=lambda item: item["current_cents"], reverse=True):
+        old = area["previous_cents"]
+        area["change_percent"] = None if old == 0 else round((area["current_cents"] - old) / old * 100, 1)
+        area_comparison.append(area)
+
+    unlocated = [
+        {
+            "expense_id": row["id"], "bill_id": row["bill_id"], "group_id": row["group_id"],
+            "group_name": row["group_name"], "merchant": row["merchant_name"], "amount_cents": amount,
+            "spent_at": row["spent_at"],
+        }
+        for row, amount in current_rows if row["lat"] is None or row["lng"] is None
+    ]
+    return {
+        "filters": {"month": selected_month, "previous_month": previous, "group_id": group_id, "category": category},
+        "groups": [dict(row) for row in groups], "categories": sorted(all_categories),
+        "summary": {
+            "current_total_cents": current_total, "previous_total_cents": previous_total,
+            "change_percent": change_percent, "expense_count": len(current_rows),
+            "located_count": len(current_points), "coverage_percent": round(len(current_points) / len(current_rows) * 100, 1) if current_rows else 0,
+        },
+        "group_heatmap": group_heatmap, "category_heatmap": category_heatmap,
+        "merchant_ranking": merchant_ranking, "points": {"current": current_points, "previous": previous_points},
+        "area_comparison": area_comparison, "unlocated": unlocated,
+    }
+
+
+@app.patch("/api/finance/expenses/{expense_id}/location")
+def update_expense_location(
+    expense_id: int,
+    body: ExpenseLocationBody,
+    user: sqlite3.Row = Depends(current_user),
+) -> dict:
+    with db() as connection:
+        row = connection.execute(
+            """SELECT expense_records.*, ai_bills.creator_id, memberships.role
+            FROM expense_records JOIN ai_bills ON ai_bills.id = expense_records.bill_id
+            JOIN memberships ON memberships.group_id = expense_records.group_id AND memberships.user_id = ?
+            WHERE expense_records.id = ?""", (user["id"], expense_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="消费记录不存在")
+        if row["creator_id"] != user["id"] and row["role"] not in {"owner", "admin"}:
+            raise HTTPException(status_code=403, detail="只有账单创建者、群主或管理员可以修改消费地点")
+        connection.execute(
+            """UPDATE expense_records SET location_name = ?, address = ?, lat = ?, lng = ?,
+            updated_at = CURRENT_TIMESTAMP WHERE id = ?""",
+            (body.name.strip(), body.address.strip(), body.lat, body.lng, expense_id),
+        )
+        updated = connection.execute("SELECT * FROM expense_records WHERE id = ?", (expense_id,)).fetchone()
+        return dict(updated)
 
 
 @app.post("/api/groups/{group_id}/ai-bills/{bill_id}/activate")
@@ -1498,6 +2361,681 @@ def delete_calendar_availability(slot_id: int, user: sqlite3.Row = Depends(curre
             raise HTTPException(status_code=404, detail="空闲时间不存在")
         connection.execute("DELETE FROM calendar_availability WHERE id = ?", (slot_id,))
         return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Travel route planning
+# ---------------------------------------------------------------------------
+
+TRAVEL_STATUSES = {"draft", "planning", "pending", "published", "ended", "archived"}
+TRAVEL_TYPES = {"attraction", "hotel", "restaurant", "shopping", "meeting", "other"}
+TRAVEL_SPEEDS_KMH = {"walk": 4.5, "walking": 4.5, "transit": 25.0, "公交": 25.0, "drive": 35.0, "driving": 35.0, "驾车": 35.0, "bike": 15.0, "骑行": 15.0}
+
+
+def parse_travel_date(value: str) -> datetime.date:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="旅行日期格式必须为 YYYY-MM-DD") from error
+
+
+def validate_travel_dates(start_date: str, end_date: str) -> None:
+    start = parse_travel_date(start_date)
+    end = parse_travel_date(end_date)
+    if end < start:
+        raise HTTPException(status_code=400, detail="结束日期不能早于出发日期")
+    if (end - start).days > 90:
+        raise HTTPException(status_code=400, detail="旅行日期不能超过 90 天")
+
+
+def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6371.0
+    p1, p2 = math.radians(float(lat1)), math.radians(float(lat2))
+    dp, dl = math.radians(float(lat2) - float(lat1)), math.radians(float(lng2) - float(lng1))
+    value = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return max(0.0, radius * 2 * math.asin(min(1.0, math.sqrt(value))))
+
+
+def travel_duration_minutes(distance_km: float, transport: str) -> int:
+    if distance_km <= 0:
+        return 0
+    speed = TRAVEL_SPEEDS_KMH.get((transport or "drive").lower(), 30.0)
+    return max(1, int(math.ceil(distance_km / speed * 60)))
+
+
+def opening_time_conflict(opening_hours: str, arrival_at: str | None, depart_at: str | None) -> bool:
+    """Best-effort check for the common ``HH:MM-HH:MM`` opening-hours format."""
+    if not opening_hours or not arrival_at:
+        return False
+    compact = opening_hours.strip().replace("：", ":")
+    if "-" not in compact:
+        return False
+    start_text, end_text = [part.strip() for part in compact.split("-", 1)]
+    try:
+        opening = datetime.strptime(start_text, "%H:%M").time()
+        closing = datetime.strptime(end_text, "%H:%M").time()
+        arrival = datetime.fromisoformat(arrival_at.replace("Z", "+00:00")).time()
+        departure = datetime.fromisoformat((depart_at or arrival_at).replace("Z", "+00:00")).time()
+    except (TypeError, ValueError):
+        return False
+    if opening <= closing:
+        return arrival < opening or departure > closing
+    # Overnight hours, e.g. 18:00-02:00.
+    return not (arrival >= opening or departure <= closing)
+
+
+def travel_membership(connection: sqlite3.Connection, plan_id: int, user_id: int) -> sqlite3.Row:
+    row = connection.execute(
+        """SELECT travel_plans.*, memberships.role FROM travel_plans
+        JOIN memberships ON memberships.group_id = travel_plans.group_id AND memberships.user_id = ?
+        WHERE travel_plans.id = ?""", (user_id, plan_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="旅行计划不存在或你不在所属群组中")
+    return row
+
+
+def travel_place_json(row: sqlite3.Row) -> dict:
+    payload = dict(row)
+    payload["must_visit"] = bool(payload.get("must_visit"))
+    if payload.get("avg_cost") is not None:
+        payload["avg_cost"] = round(float(payload["avg_cost"]), 2)
+    if payload.get("rating") is not None:
+        payload["rating"] = round(float(payload["rating"]), 1)
+    return payload
+
+
+def travel_day_json(connection: sqlite3.Connection, row: sqlite3.Row) -> dict:
+    nodes = connection.execute(
+        """SELECT travel_nodes.*, travel_places.name AS place_name, travel_places.type AS place_type,
+        travel_places.address AS place_address, travel_places.lat AS place_lat, travel_places.lng AS place_lng,
+        travel_places.avg_cost AS place_avg_cost, travel_places.opening_hours AS place_opening_hours,
+        travel_places.must_visit AS place_must_visit
+        FROM travel_nodes JOIN travel_places ON travel_places.id = travel_nodes.place_id
+        WHERE travel_nodes.day_id = ? ORDER BY travel_nodes.sort_order, travel_nodes.id""", (row["id"],),
+    ).fetchall()
+    payload = dict(row)
+    payload["nodes"] = []
+    for node in nodes:
+        item = dict(node)
+        item["confirmed"] = bool(item.get("confirmed"))
+        item["opening_conflict"] = bool(item.get("opening_conflict"))
+        payload["nodes"].append(item)
+    payload["total_distance_km"] = round(float(payload.get("total_distance_km") or 0), 2)
+    payload["total_duration_min"] = int(payload.get("total_duration_min") or 0)
+    return payload
+
+
+def travel_plan_json(connection: sqlite3.Connection, row: sqlite3.Row, user_id: int, include_members: bool = False) -> dict:
+    places = connection.execute("SELECT * FROM travel_places WHERE plan_id = ? ORDER BY must_visit DESC, id", (row["id"],)).fetchall()
+    days = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date, id", (row["id"],)).fetchall()
+    payload = dict(row)
+    payload["budget"] = round(int(payload.get("budget_cents") or 0) / 100, 2)
+    votes = connection.execute("SELECT travel_place_votes.*, users.nickname FROM travel_place_votes JOIN users ON users.id = travel_place_votes.user_id WHERE plan_id = ? ORDER BY id", (row["id"],)).fetchall()
+    payload["places"] = []
+    for place in places:
+        place_payload = travel_place_json(place)
+        place_votes = [dict(vote) for vote in votes if vote["place_id"] == place["id"]]
+        place_payload["vote_count"] = len(place_votes)
+        place_payload["votes"] = place_votes
+        place_payload["my_vote"] = next((vote for vote in place_votes if int(vote["user_id"]) == int(user_id)), None)
+        member_count = connection.execute("SELECT COUNT(*) FROM memberships WHERE group_id = ?", (row["group_id"],)).fetchone()[0]
+        positions = connection.execute("SELECT lat, lng FROM travel_member_locations WHERE plan_id = ? AND participating = 1 AND lat IS NOT NULL AND lng IS NOT NULL", (row["id"],)).fetchall()
+        distances = [haversine_km(position["lat"], position["lng"], place["lat"], place["lng"]) for position in positions]
+        average_distance = sum(distances) / len(distances) if distances else None
+        distance_score = max(0.0, min(100.0, 100.0 - (average_distance or 0) * 12))
+        vote_score = (len(place_votes) / member_count * 100) if member_count else 0.0
+        budget_score = 100.0
+        if place["avg_cost"] is not None and row["budget_cents"] and row["estimated_people"]:
+            per_person_budget = row["budget_cents"] / 100 / max(row["estimated_people"], 1)
+            budget_score = max(0.0, 100.0 - abs(float(place["avg_cost"]) - per_person_budget) / max(per_person_budget, 1) * 100)
+        place_payload.update({"average_distance_km": round(average_distance, 2) if average_distance is not None else None, "distance_score": round(distance_score, 1), "vote_score": round(vote_score, 1), "budget_score": round(budget_score, 1), "opening_score": 100.0, "score": round(distance_score * 0.35 + vote_score * 0.30 + budget_score * 0.20 + 15, 1)})
+        payload["places"].append(place_payload)
+    payload["days"] = [travel_day_json(connection, day) for day in days]
+    payload["place_count"] = len(places)
+    payload["day_count"] = len(days)
+    payload["must_visit_count"] = sum(bool(place["must_visit"]) for place in places)
+    payload["is_manager"] = row["role"] in {"owner", "admin"}
+    if include_members:
+        payload["members"] = [dict(member) for member in connection.execute(
+            """SELECT users.id, COALESCE(memberships.group_nickname, users.nickname) AS name,
+            memberships.role FROM memberships JOIN users ON users.id = memberships.user_id
+            WHERE memberships.group_id = ? ORDER BY memberships.role DESC, users.id""", (row["group_id"],)
+        ).fetchall()]
+    return payload
+
+
+def require_travel_manager(connection: sqlite3.Connection, plan_id: int, user_id: int) -> sqlite3.Row:
+    row = travel_membership(connection, plan_id, user_id)
+    if row["role"] not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="只有群主或管理员可以管理旅行计划")
+    return row
+
+
+def ensure_plan_place(connection: sqlite3.Connection, plan_id: int, place_id: int | None) -> sqlite3.Row | None:
+    if place_id is None:
+        return None
+    row = connection.execute("SELECT * FROM travel_places WHERE id = ? AND plan_id = ?", (place_id, plan_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=400, detail="路线地点不属于当前旅行计划")
+    return row
+
+
+def travel_day_bounds(plan: sqlite3.Row, travel_date: str) -> None:
+    target = parse_travel_date(travel_date)
+    if target < parse_travel_date(plan["start_date"]) or target > parse_travel_date(plan["end_date"]):
+        raise HTTPException(status_code=400, detail="行程日期必须位于旅行日期范围内")
+
+
+def travel_route_metrics(connection: sqlite3.Connection, day: sqlite3.Row, nodes: list[TravelRouteNodeBody]) -> tuple[list[dict], float, int]:
+    place_ids = [node.place_id for node in nodes]
+    if len(set(place_ids)) != len(place_ids):
+        raise HTTPException(status_code=400, detail="同一个地点不能在同一天路线中重复添加")
+    places = []
+    for place_id in place_ids:
+        place = ensure_plan_place(connection, day["plan_id"], place_id)
+        if place:
+            places.append(place)
+    total_distance = 0.0
+    total_duration = 0
+    previous = connection.execute("SELECT * FROM travel_places WHERE id = ?", (day["start_place_id"],)).fetchone() if day["start_place_id"] else None
+    metrics = []
+    for index, node in enumerate(nodes):
+        current = places[index]
+        distance = haversine_km(previous["lat"], previous["lng"], current["lat"], current["lng"]) if previous else 0.0
+        segment_transport = node.transport or day["transport"] or "drive"
+        duration = travel_duration_minutes(distance, segment_transport)
+        total_distance += distance
+        total_duration += duration + int(node.stay_minutes or 0)
+        metrics.append({"node": node, "place": current, "distance_km": round(distance, 3), "duration_min": duration, "opening_conflict": opening_time_conflict(current["opening_hours"], node.arrival_at, node.depart_at)})
+        previous = current
+    if places and day["end_place_id"]:
+        end_place = connection.execute("SELECT * FROM travel_places WHERE id = ?", (day["end_place_id"],)).fetchone()
+        distance = haversine_km(previous["lat"], previous["lng"], end_place["lat"], end_place["lng"])
+        total_distance += distance
+        total_duration += travel_duration_minutes(distance, day["transport"] or "drive")
+    # If explicit day times are present, flag a route that cannot fit in its window.
+    if day["start_at"] and day["end_at"]:
+        try:
+            available = int((datetime.fromisoformat(day["end_at"].replace("Z", "+00:00")) - datetime.fromisoformat(day["start_at"].replace("Z", "+00:00"))).total_seconds() // 60)
+            if total_duration > available:
+                for metric in metrics:
+                    metric["opening_conflict"] = True
+        except ValueError:
+            pass
+    return metrics, round(max(0.0, total_distance), 3), max(0, total_duration)
+
+
+@app.get("/api/groups/{group_id}/travel-plans")
+def list_travel_plans(group_id: int, user: sqlite3.Row = Depends(current_user)) -> list[dict]:
+    with db() as connection:
+        membership(connection, group_id, user["id"])
+        rows = connection.execute("SELECT travel_plans.*, memberships.role FROM travel_plans JOIN memberships ON memberships.group_id = travel_plans.group_id AND memberships.user_id = ? WHERE travel_plans.group_id = ? ORDER BY travel_plans.updated_at DESC, travel_plans.id DESC", (user["id"], group_id)).fetchall()
+        return [travel_plan_json(connection, row, user["id"]) for row in rows]
+
+
+@app.post("/api/groups/{group_id}/travel-plans", status_code=201)
+def create_travel_plan(group_id: int, body: TravelPlanBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    validate_travel_dates(body.start_date, body.end_date)
+    with db() as connection:
+        require_role(connection, group_id, user["id"], {"owner", "admin"})
+        cursor = connection.execute(
+            """INSERT INTO travel_plans(group_id, creator_id, name, destination, start_date, end_date,
+            departure_city, default_start_point, default_transport, estimated_people, budget_cents, notes, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')""",
+            (group_id, user["id"], body.name.strip(), body.destination.strip(), body.start_date, body.end_date,
+             body.departure_city.strip(), body.default_start_point.strip(), body.default_transport.strip(), body.estimated_people,
+             round(body.budget * 100) if body.budget is not None else body.budget_cents, body.notes.strip()),
+        )
+        row = connection.execute("SELECT travel_plans.*, memberships.role FROM travel_plans JOIN memberships ON memberships.group_id = travel_plans.group_id AND memberships.user_id = ? WHERE travel_plans.id = ?", (user["id"], cursor.lastrowid)).fetchone()
+        audit(connection, group_id, user["id"], "travel_plan_created", f"创建旅行计划“{body.name.strip()}”", target_id=cursor.lastrowid)
+        return travel_plan_json(connection, row, user["id"], True)
+
+
+@app.get("/api/travel-plans/{plan_id}")
+def get_travel_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        row = travel_membership(connection, plan_id, user["id"])
+        return travel_plan_json(connection, row, user["id"], True)
+
+
+@app.patch("/api/travel-plans/{plan_id}")
+def update_travel_plan(plan_id: int, body: TravelPlanUpdateBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        values = body.model_dump(exclude_none=True)
+        if "budget" in values:
+            values["budget_cents"] = round(float(values.pop("budget")) * 100)
+        start_date = values.get("start_date", plan["start_date"])
+        end_date = values.get("end_date", plan["end_date"])
+        validate_travel_dates(start_date, end_date)
+        if values.get("status") == "archived" and plan["status"] != "ended":
+            raise HTTPException(status_code=400, detail="只有已结束的旅行计划可以归档")
+        if values:
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            connection.execute(f"UPDATE travel_plans SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (*values.values(), plan_id))
+        row = connection.execute("SELECT travel_plans.*, memberships.role FROM travel_plans JOIN memberships ON memberships.group_id = travel_plans.group_id AND memberships.user_id = ? WHERE travel_plans.id = ?", (user["id"], plan_id)).fetchone()
+        return travel_plan_json(connection, row, user["id"], True)
+
+
+@app.delete("/api/travel-plans/{plan_id}")
+def delete_travel_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        connection.execute("DELETE FROM travel_plans WHERE id = ?", (plan_id,))
+        audit(connection, plan["group_id"], user["id"], "travel_plan_deleted", f"删除旅行计划“{plan['name']}”", target_id=plan_id)
+        return {"ok": True, "deleted_id": plan_id}
+
+
+@app.post("/api/travel-plans/{plan_id}/places", status_code=201)
+def create_travel_place(plan_id: int, body: TravelPlaceBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        cursor = connection.execute(
+            """INSERT INTO travel_places(plan_id, type, name, address, lat, lng, provider_place_id,
+            opening_hours, avg_cost, phone, rating, must_visit, note, image_url, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (plan_id, body.type, body.name.strip(), body.address.strip(), body.lat, body.lng, body.provider_place_id.strip(),
+             body.opening_hours.strip(), body.avg_cost, body.phone.strip(), body.rating, int(body.must_visit), body.note.strip(), body.image_url.strip(), user["id"]),
+        )
+        row = connection.execute("SELECT * FROM travel_places WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        connection.execute("UPDATE travel_plans SET updated_at = CURRENT_TIMESTAMP, status = CASE WHEN status = 'draft' THEN 'planning' ELSE status END WHERE id = ?", (plan_id,))
+        return travel_place_json(row)
+
+
+@app.patch("/api/travel-places/{place_id}")
+def update_travel_place(place_id: int, body: TravelPlaceUpdateBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        place = connection.execute("SELECT * FROM travel_places WHERE id = ?", (place_id,)).fetchone()
+        if not place:
+            raise HTTPException(status_code=404, detail="旅行地点不存在")
+        require_travel_manager(connection, place["plan_id"], user["id"])
+        values = body.model_dump(exclude_none=True)
+        if values:
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            connection.execute(f"UPDATE travel_places SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (*values.values(), place_id))
+        return travel_place_json(connection.execute("SELECT * FROM travel_places WHERE id = ?", (place_id,)).fetchone())
+
+
+@app.post("/api/travel-plans/{plan_id}/places/{place_id}/vote")
+def vote_travel_place(plan_id: int, place_id: int, body: TravelPlaceVoteBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        travel_membership(connection, plan_id, user["id"])
+        place = connection.execute("SELECT id FROM travel_places WHERE id = ? AND plan_id = ?", (place_id, plan_id)).fetchone()
+        if not place:
+            raise HTTPException(status_code=404, detail="旅行地点不存在")
+        connection.execute(
+            """INSERT INTO travel_place_votes(plan_id, place_id, user_id, suggestion, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(plan_id, user_id) DO UPDATE SET place_id = excluded.place_id, suggestion = excluded.suggestion, updated_at = CURRENT_TIMESTAMP""",
+            (plan_id, place_id, user["id"], body.suggestion.strip()),
+        )
+        return {"ok": True, "plan_id": plan_id, "place_id": place_id, "suggestion": body.suggestion.strip()}
+
+
+@app.get("/api/travel-plans/{plan_id}/place-votes")
+def list_travel_place_votes(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> list[dict]:
+    with db() as connection:
+        travel_membership(connection, plan_id, user["id"])
+        return [dict(row) for row in connection.execute(
+            """SELECT travel_place_votes.*, users.nickname, travel_places.name AS place_name
+            FROM travel_place_votes JOIN users ON users.id = travel_place_votes.user_id
+            JOIN travel_places ON travel_places.id = travel_place_votes.place_id
+            WHERE travel_place_votes.plan_id = ? ORDER BY travel_place_votes.id""", (plan_id,)
+        ).fetchall()]
+
+
+@app.delete("/api/travel-places/{place_id}")
+def delete_travel_place(place_id: int, force: bool = False, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        place = connection.execute("SELECT * FROM travel_places WHERE id = ?", (place_id,)).fetchone()
+        if not place:
+            raise HTTPException(status_code=404, detail="旅行地点不存在")
+        require_travel_manager(connection, place["plan_id"], user["id"])
+        linked = connection.execute("SELECT COUNT(*) FROM travel_nodes WHERE place_id = ?", (place_id,)).fetchone()[0]
+        if linked and not force:
+            raise HTTPException(status_code=409, detail={"message": "该地点已被安排在路线中", "linked_days": linked, "can_force": True})
+        connection.execute("DELETE FROM travel_places WHERE id = ?", (place_id,))
+        return {"ok": True, "deleted_id": place_id, "removed_route_days": linked}
+
+
+@app.get("/api/travel-plans/{plan_id}/days")
+def list_travel_days(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> list[dict]:
+    with db() as connection:
+        travel_membership(connection, plan_id, user["id"])
+        return [travel_day_json(connection, row) for row in connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date, id", (plan_id,)).fetchall()]
+
+
+@app.post("/api/travel-plans/{plan_id}/days", status_code=201)
+def create_travel_day(plan_id: int, body: TravelDayBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        travel_day_bounds(plan, body.travel_date)
+        if (body.start_at and not body.end_at) or (body.end_at and not body.start_at):
+            raise HTTPException(status_code=400, detail="每日行程需要同时填写开始和结束时间")
+        if body.start_at and body.end_at:
+            validate_time_range(body.start_at, body.end_at)
+        ensure_plan_place(connection, plan_id, body.start_place_id)
+        ensure_plan_place(connection, plan_id, body.end_place_id)
+        try:
+            cursor = connection.execute(
+                """INSERT INTO travel_days(plan_id, travel_date, title, start_at, end_at, start_place_id,
+                end_place_id, transport, budget_cents, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (plan_id, body.travel_date, body.title.strip() or f"{body.travel_date} 行程", body.start_at, body.end_at, body.start_place_id, body.end_place_id, body.transport.strip(), body.budget_cents, body.notes.strip(), body.status),
+            )
+        except sqlite3.IntegrityError as error:
+            raise HTTPException(status_code=409, detail="该日期已经有每日行程") from error
+        return travel_day_json(connection, connection.execute("SELECT * FROM travel_days WHERE id = ?", (cursor.lastrowid,)).fetchone())
+
+
+@app.patch("/api/travel-days/{day_id}")
+def update_travel_day(day_id: int, body: TravelDayUpdateBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone()
+        if not day:
+            raise HTTPException(status_code=404, detail="每日行程不存在")
+        plan = require_travel_manager(connection, day["plan_id"], user["id"])
+        values = body.model_dump(exclude_none=True)
+        target_date = values.get("travel_date", day["travel_date"])
+        travel_day_bounds(plan, target_date)
+        start_at, end_at = values.get("start_at", day["start_at"]), values.get("end_at", day["end_at"])
+        if (start_at and not end_at) or (end_at and not start_at):
+            raise HTTPException(status_code=400, detail="每日行程需要同时填写开始和结束时间")
+        if start_at and end_at:
+            validate_time_range(start_at, end_at)
+        ensure_plan_place(connection, day["plan_id"], values.get("start_place_id", day["start_place_id"]))
+        ensure_plan_place(connection, day["plan_id"], values.get("end_place_id", day["end_place_id"]))
+        if values:
+            assignments = ", ".join(f"{key} = ?" for key in values)
+            connection.execute(f"UPDATE travel_days SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (*values.values(), day_id))
+        return travel_day_json(connection, connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone())
+
+
+@app.delete("/api/travel-days/{day_id}")
+def delete_travel_day(day_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone()
+        if not day:
+            raise HTTPException(status_code=404, detail="每日行程不存在")
+        require_travel_manager(connection, day["plan_id"], user["id"])
+        connection.execute("DELETE FROM travel_days WHERE id = ?", (day_id,))
+        return {"ok": True, "deleted_id": day_id}
+
+
+@app.put("/api/travel-days/{day_id}/route")
+def save_travel_route(day_id: int, body: TravelRouteBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone()
+        if not day:
+            raise HTTPException(status_code=404, detail="每日行程不存在")
+        require_travel_manager(connection, day["plan_id"], user["id"])
+        metrics, total_distance, total_duration = travel_route_metrics(connection, day, body.nodes)
+        connection.execute("DELETE FROM travel_nodes WHERE day_id = ?", (day_id,))
+        cursor_time = None
+        if day["start_at"]:
+            try:
+                cursor_time = datetime.fromisoformat(day["start_at"].replace("Z", "+00:00"))
+            except ValueError:
+                cursor_time = None
+        elapsed = 0
+        for index, metric in enumerate(metrics):
+            node = metric["node"]
+            arrival_at = node.arrival_at
+            depart_at = node.depart_at
+            if cursor_time and not arrival_at:
+                arrival_at = (cursor_time + timedelta(minutes=elapsed)).isoformat(timespec="minutes")
+            if arrival_at and not depart_at:
+                try:
+                    depart_at = (datetime.fromisoformat(arrival_at.replace("Z", "+00:00")) + timedelta(minutes=node.stay_minutes)).isoformat(timespec="minutes")
+                except ValueError:
+                    depart_at = None
+            metric["opening_conflict"] = opening_time_conflict(metric["place"]["opening_hours"], arrival_at, depart_at) or metric["opening_conflict"]
+            connection.execute(
+                """INSERT INTO travel_nodes(day_id, place_id, sort_order, arrival_at, stay_minutes, depart_at,
+                transport, distance_km, duration_min, confirmed, opening_conflict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (day_id, node.place_id, index, arrival_at, node.stay_minutes, depart_at, node.transport or day["transport"], metric["distance_km"], metric["duration_min"], int(node.confirmed), int(metric["opening_conflict"])),
+            )
+            elapsed += metric["duration_min"] + int(node.stay_minutes or 0)
+        score = max(0.0, min(100.0, 100.0 - total_distance * 2 - max(0, total_duration - 600) * 0.05)) if metrics else 0.0
+        connection.execute("UPDATE travel_days SET total_distance_km = ?, total_duration_min = ?, route_score = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (total_distance, total_duration, round(score, 1), day_id))
+        return travel_day_json(connection, connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone())
+
+
+@app.get("/api/travel-days/{day_id}/route")
+def get_travel_route(day_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_id,)).fetchone()
+        if not day:
+            raise HTTPException(status_code=404, detail="每日行程不存在")
+        travel_membership(connection, day["plan_id"], user["id"])
+        return travel_day_json(connection, day)
+
+
+def build_auto_plan_options(connection: sqlite3.Connection, plan: sqlite3.Row, body: TravelAutoPlanBody) -> list[dict]:
+    place_rows = connection.execute("SELECT * FROM travel_places WHERE plan_id = ? ORDER BY must_visit DESC, id", (plan["id"],)).fetchall()
+    if body.place_ids:
+        allowed = set(body.place_ids)
+        place_rows = [place for place in place_rows if place["id"] in allowed]
+    if not place_rows:
+        raise HTTPException(status_code=400, detail="请先添加至少一个旅行地点")
+    dates = [body.travel_date] if body.travel_date else [row["travel_date"] for row in connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date", (plan["id"],)).fetchall()]
+    if not dates:
+        dates = [plan["start_date"]]
+    for date_value in dates:
+        travel_day_bounds(plan, date_value)
+    candidates = []
+    for mode, label in [("distance", "距离最短"), ("time", "时间最省"), ("places", "景点最多"), ("comfort", "舒适度最高")]:
+        ordered = list(place_rows)
+        if mode == "distance":
+            ordered.sort(key=lambda place: (not place["must_visit"], place["id"]))
+        elif mode == "time":
+            ordered.sort(key=lambda place: (not place["must_visit"], float(place["avg_cost"] or 0), place["id"]))
+        elif mode == "places":
+            ordered.sort(key=lambda place: (not place["must_visit"], -(float(place["rating"] or 0)), place["id"]))
+        else:
+            ordered.sort(key=lambda place: (not place["must_visit"], float(place["avg_cost"] or 0), -(float(place["rating"] or 0))))
+        day_payloads = []
+        cursor = 0
+        for date_value in dates:
+            existing = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? AND travel_date = ?", (plan["id"], date_value)).fetchone()
+            max_count = max(1, min(len(ordered), int(body.max_play_minutes / 90)))
+            selected = ordered[cursor:cursor + max_count] if len(dates) > 1 else ordered[:max_count]
+            cursor += max_count
+            if not selected:
+                selected = ordered[:max_count]
+            nodes = []
+            current_minutes = int(body.earliest_start[:2]) * 60 + int(body.earliest_start[3:])
+            for place in selected:
+                arrival = f"{date_value}T{current_minutes // 60:02d}:{current_minutes % 60:02d}"
+                depart_minutes = current_minutes + 60
+                nodes.append({"place_id": place["id"], "place_name": place["name"], "arrival_at": arrival, "stay_minutes": 60, "depart_at": f"{date_value}T{depart_minutes // 60:02d}:{depart_minutes % 60:02d}", "transport": body.transport, "confirmed": False})
+                current_minutes = depart_minutes + 30
+            total_distance = sum(haversine_km(selected[index - 1]["lat"], selected[index - 1]["lng"], selected[index]["lat"], selected[index]["lng"]) for index in range(1, len(selected)))
+            total_duration = len(selected) * 60 + max(0, len(selected) - 1) * 30 + travel_duration_minutes(total_distance, body.transport)
+            day_payloads.append({"travel_date": date_value, "title": f"{date_value} 推荐路线", "day_id": existing["id"] if existing else None, "nodes": nodes, "total_distance_km": round(total_distance, 2), "total_duration_min": total_duration, "budget_cents": int(sum(float(place["avg_cost"] or 0) * 100 for place in selected)), "unassigned_place_ids": [place["id"] for place in ordered if place["id"] not in {item["place_id"] for item in nodes}]})
+        total_distance = round(sum(day["total_distance_km"] for day in day_payloads), 2)
+        total_duration = sum(day["total_duration_min"] for day in day_payloads)
+        score = max(0.0, min(100.0, 100.0 - total_distance * 2 + (10 if mode in {"places", "comfort"} else 0)))
+        candidates.append({"option_id": mode, "name": label, "description": f"按{label}排序，使用免费距离估算", "days": day_payloads, "total_distance_km": total_distance, "total_duration_min": total_duration, "estimated_budget_cents": sum(day["budget_cents"] for day in day_payloads), "score": round(score, 1), "unassigned_place_ids": sorted({item for day in day_payloads for item in day["unassigned_place_ids"]})})
+    return candidates
+
+
+@app.post("/api/travel-plans/{plan_id}/auto-plan")
+def auto_plan_travel(plan_id: int, body: TravelAutoPlanBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        options = build_auto_plan_options(connection, plan, body)
+        return {"plan_id": plan_id, "options": options, "provider": "haversine-estimate", "notice": "当前使用免费直线距离和交通速度估算；可在地图中查看地点位置。"}
+
+
+@app.post("/api/travel-plans/{plan_id}/apply-plan")
+def apply_travel_plan(plan_id: int, body: TravelApplyPlanBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        if body.option_id not in {"distance", "time", "places", "comfort", "balanced"}:
+            raise HTTPException(status_code=400, detail="路线方案不存在，请重新生成")
+        options = build_auto_plan_options(connection, plan, TravelAutoPlanBody(prioritize=body.option_id if body.option_id != "balanced" else "distance"))
+        option = next((item for item in options if item["option_id"] == body.option_id), options[0])
+        applied = []
+        for day_data in option["days"]:
+            day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (day_data["day_id"],)).fetchone() if day_data["day_id"] else None
+            if not day:
+                day = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? AND travel_date = ?", (plan_id, day_data["travel_date"])).fetchone()
+            if not day:
+                cursor = connection.execute("INSERT INTO travel_days(plan_id, travel_date, title, transport, budget_cents) VALUES (?, ?, ?, ?, ?)", (plan_id, day_data["travel_date"], day_data["title"], plan["default_transport"], day_data["budget_cents"]))
+                day = connection.execute("SELECT * FROM travel_days WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            nodes = [TravelRouteNodeBody(place_id=node["place_id"], arrival_at=node["arrival_at"], stay_minutes=node["stay_minutes"], depart_at=node["depart_at"], transport=node["transport"], confirmed=False) for node in day_data["nodes"]]
+            metrics, distance, duration = travel_route_metrics(connection, day, nodes)
+            connection.execute("DELETE FROM travel_nodes WHERE day_id = ?", (day["id"],))
+            for index, metric in enumerate(metrics):
+                node = metric["node"]
+                connection.execute("INSERT INTO travel_nodes(day_id, place_id, sort_order, arrival_at, stay_minutes, depart_at, transport, distance_km, duration_min, confirmed, opening_conflict) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)", (day["id"], node.place_id, index, node.arrival_at, node.stay_minutes, node.depart_at, node.transport or day["transport"], metric["distance_km"], metric["duration_min"], int(metric["opening_conflict"])))
+            connection.execute("UPDATE travel_days SET total_distance_km = ?, total_duration_min = ?, route_score = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (distance, duration, option["score"], day["id"]))
+            applied.append(travel_day_json(connection, connection.execute("SELECT * FROM travel_days WHERE id = ?", (day["id"],)).fetchone()))
+        connection.execute("UPDATE travel_plans SET status = 'planning', updated_at = CURRENT_TIMESTAMP WHERE id = ?", (plan_id,))
+        return {"plan_id": plan_id, "option_id": body.option_id, "days": applied, "score": option["score"]}
+
+
+@app.post("/api/travel-plans/{plan_id}/location")
+def save_travel_member_location(plan_id: int, body: TravelMemberLocationBody, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = travel_membership(connection, plan_id, user["id"])
+        if body.participating and (body.lat is None or body.lng is None):
+            raise HTTPException(status_code=400, detail="参与集合点推荐时需要提供位置，未授权定位可手动填写经纬度")
+        connection.execute(
+            """INSERT INTO travel_member_locations(plan_id, user_id, lat, lng, address, participating, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(plan_id, user_id) DO UPDATE SET lat = excluded.lat, lng = excluded.lng, address = excluded.address, participating = excluded.participating, updated_at = CURRENT_TIMESTAMP""",
+            (plan_id, user["id"], body.lat, body.lng, body.address.strip(), int(body.participating)),
+        )
+        return {"ok": True, "plan_id": plan_id, "participating": body.participating}
+
+
+@app.get("/api/travel-plans/{plan_id}/locations")
+def list_travel_member_locations(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> list[dict]:
+    with db() as connection:
+        plan = travel_membership(connection, plan_id, user["id"])
+        rows = connection.execute(
+            """SELECT travel_member_locations.*, COALESCE(memberships.group_nickname, users.nickname) AS user_name
+            FROM travel_member_locations JOIN users ON users.id = travel_member_locations.user_id
+            JOIN memberships ON memberships.group_id = ? AND memberships.user_id = users.id
+            WHERE travel_member_locations.plan_id = ? ORDER BY users.id""", (plan["group_id"], plan_id)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+@app.get("/api/travel-plans/{plan_id}/meeting-recommendation")
+def travel_meeting_recommendation(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = travel_membership(connection, plan_id, user["id"])
+        locations = connection.execute("SELECT travel_member_locations.*, COALESCE(memberships.group_nickname, users.nickname) AS user_name FROM travel_member_locations JOIN users ON users.id = travel_member_locations.user_id JOIN memberships ON memberships.group_id = ? AND memberships.user_id = travel_member_locations.user_id WHERE travel_member_locations.plan_id = ? AND participating = 1 AND lat IS NOT NULL AND lng IS NOT NULL", (plan["group_id"], plan_id)).fetchall()
+        if len(locations) < 2:
+            return {"ready": False, "count": len(locations), "required": 2, "message": "至少需要 2 名成员提交参与位置后才能推荐集合点", "candidates": []}
+        lat = sum(float(row["lat"]) for row in locations) / len(locations)
+        lng = sum(float(row["lng"]) for row in locations) / len(locations)
+        place = connection.execute("SELECT * FROM travel_places WHERE plan_id = ? ORDER BY must_visit DESC, id LIMIT 1", (plan_id,)).fetchone()
+        candidates = [{"name": "成员位置几何中心", "address": f"{lat:.6f}, {lng:.6f}", "lat": round(lat, 6), "lng": round(lng, 6)},]
+        if place:
+            candidates.append({"name": place["name"], "address": place["address"], "lat": place["lat"], "lng": place["lng"]})
+        scored = []
+        for candidate in candidates:
+            distances = [{"user_id": row["user_id"], "user_name": row["user_name"], "distance_km": round(haversine_km(row["lat"], row["lng"], candidate["lat"], candidate["lng"]), 2)} for row in locations]
+            average = sum(item["distance_km"] for item in distances) / len(distances)
+            longest = max(item["distance_km"] for item in distances)
+            score = max(0.0, min(100.0, 100.0 - average * 12 - longest * 3))
+            scored.append({**candidate, "member_distances": distances, "average_distance_km": round(average, 2), "max_distance_km": round(longest, 2), "score": round(score, 1)})
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return {"ready": True, "count": len(locations), "recommended": scored[0], "candidates": scored, "formula": "距离便利度综合评分，使用 Haversine 免费估算"}
+
+
+def travel_publish_checks(connection: sqlite3.Connection, plan: sqlite3.Row) -> dict:
+    places = connection.execute("SELECT * FROM travel_places WHERE plan_id = ?", (plan["id"],)).fetchall()
+    days = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date", (plan["id"],)).fetchall()
+    nodes = connection.execute("SELECT travel_nodes.*, travel_days.travel_date FROM travel_nodes JOIN travel_days ON travel_days.id = travel_nodes.day_id WHERE travel_days.plan_id = ?", (plan["id"],)).fetchall()
+    assigned = {row["place_id"] for row in nodes}
+    missing_must = [row["name"] for row in places if row["must_visit"] and row["id"] not in assigned]
+    conflicts = [row["travel_date"] for row in nodes if row["opening_conflict"]]
+    over_time = [row["travel_date"] for row in days if row["start_at"] and row["end_at"] and row["total_duration_min"] > int((datetime.fromisoformat(row["end_at"].replace("Z", "+00:00")) - datetime.fromisoformat(row["start_at"].replace("Z", "+00:00"))).total_seconds() // 60)]
+    duplicate_rows = connection.execute("SELECT travel_nodes.place_id, COUNT(*) AS count FROM travel_nodes JOIN travel_days ON travel_days.id = travel_nodes.day_id WHERE travel_days.plan_id = ? GROUP BY travel_nodes.place_id HAVING COUNT(*) > 1", (plan["id"],)).fetchall()
+    duplicate_places = [next((place["name"] for place in places if place["id"] == row["place_id"]), str(row["place_id"])) for row in duplicate_rows]
+    missing_endpoints = [row["travel_date"] for row in days if not row["start_place_id"] or not row["end_place_id"]]
+    total_budget = sum(int(row["budget_cents"] or 0) + int(sum(float(place["place_avg_cost"] or 0) * 100 for place in connection.execute("SELECT travel_places.avg_cost AS place_avg_cost FROM travel_nodes JOIN travel_places ON travel_places.id = travel_nodes.place_id WHERE travel_nodes.day_id = ?", (row["id"],)).fetchall())) for row in days)
+    over_budget = bool(plan["budget_cents"] and total_budget > plan["budget_cents"])
+    errors = []
+    if not days: errors.append("至少需要一个每日行程")
+    if missing_must: errors.append(f"存在未安排的必去地点：{'、'.join(missing_must)}")
+    if conflicts: errors.append("路线存在营业时间或每日可用时间冲突")
+    if over_time: errors.append(f"以下日期超出可用时间：{'、'.join(over_time)}")
+    if duplicate_places: errors.append(f"地点重复安排：{'、'.join(duplicate_places)}")
+    if missing_endpoints: errors.append(f"以下日期缺少起点或终点：{'、'.join(missing_endpoints)}")
+    if over_budget: errors.append("每日预算合计超过旅行总预算")
+    return {"passed": not errors, "errors": errors, "missing_must_visit": missing_must, "opening_conflicts": sorted(set(conflicts)), "over_time_days": sorted(set(over_time)), "duplicate_places": duplicate_places, "missing_endpoints": sorted(set(missing_endpoints)), "total_budget_cents": total_budget, "budget_cents": int(plan["budget_cents"] or 0)}
+
+
+@app.get("/api/travel-plans/{plan_id}/publish-check")
+def check_travel_publish(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = travel_membership(connection, plan_id, user["id"])
+        return travel_publish_checks(connection, plan)
+
+
+@app.post("/api/travel-plans/{plan_id}/publish")
+def publish_travel_plan(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        checks = travel_publish_checks(connection, plan)
+        if not checks["passed"]:
+            raise HTTPException(status_code=400, detail={"message": "发布前检查未通过", "details": checks["errors"], "checks": checks})
+        connection.execute("UPDATE travel_plans SET status = 'published', published_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (plan_id,))
+        connection.execute("UPDATE travel_days SET status = 'confirmed', updated_at = CURRENT_TIMESTAMP WHERE plan_id = ?", (plan_id,))
+        audit(connection, plan["group_id"], user["id"], "travel_plan_published", f"发布旅行行程“{plan['name']}”", target_id=plan_id)
+        row = connection.execute("SELECT travel_plans.*, memberships.role FROM travel_plans JOIN memberships ON memberships.group_id = travel_plans.group_id AND memberships.user_id = ? WHERE travel_plans.id = ?", (user["id"], plan_id)).fetchone()
+        return {"plan": travel_plan_json(connection, row, user["id"], True), "checks": checks}
+
+
+@app.post("/api/travel-plans/{plan_id}/sync-calendar")
+def sync_travel_calendar(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = require_travel_manager(connection, plan_id, user["id"])
+        if plan["status"] != "published":
+            raise HTTPException(status_code=400, detail="只有已发布的旅行路线才能同步到共享日程")
+        days = connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date", (plan_id,)).fetchall()
+        synced = []
+        for day in days:
+            day_payload = travel_day_json(connection, day)
+            if not day_payload["nodes"]:
+                continue
+            first = day_payload["nodes"][0]
+            last = day_payload["nodes"][-1]
+            start_at = first.get("arrival_at") or day["start_at"] or f"{day['travel_date']}T09:00"
+            end_at = last.get("depart_at") or day["end_at"] or f"{day['travel_date']}T18:00"
+            items = [(node["place_name"], node.get("arrival_at") or start_at, node.get("depart_at") or end_at) for node in day_payload["nodes"]]
+            activity_id = day["activity_id"]
+            if activity_id:
+                activity = connection.execute("SELECT id FROM activities WHERE id = ? AND group_id = ?", (activity_id, plan["group_id"])).fetchone()
+            else:
+                activity = None
+            if activity:
+                connection.execute("UPDATE activities SET title = ?, description = ?, mode = 'fixed', status = 'published', start_at = ?, end_at = ?, form = '旅行路线', notice = ?, published_at = CURRENT_TIMESTAMP WHERE id = ?", (f"{plan['name']} · {day['travel_date']}", plan["destination"], start_at, end_at, day["notes"] or "已同步旅行路线", activity_id))
+                connection.execute("DELETE FROM activity_items WHERE activity_id = ?", (activity_id,))
+            else:
+                cursor = connection.execute("INSERT INTO activities(group_id, creator_id, title, description, mode, status, start_at, end_at, form, notice, published_at) VALUES (?, ?, ?, ?, 'fixed', 'published', ?, ?, '旅行路线', ?, CURRENT_TIMESTAMP)", (plan["group_id"], user["id"], f"{plan['name']} · {day['travel_date']}", plan["destination"], start_at, end_at, day["notes"] or "已同步旅行路线"))
+                activity_id = cursor.lastrowid
+                connection.execute("UPDATE travel_days SET activity_id = ? WHERE id = ?", (activity_id, day["id"]))
+            for index, (title, item_start, item_end) in enumerate(items):
+                connection.execute("INSERT INTO activity_items(activity_id, title, start_at, end_at, note, sort_order) VALUES (?, ?, ?, ?, '', ?)", (activity_id, title, item_start, item_end, index))
+            synced.append({"day_id": day["id"], "activity_id": activity_id, "travel_date": day["travel_date"], "title": f"{plan['name']} · {day['travel_date']}"})
+        connection.execute("UPDATE travel_plans SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (plan_id,))
+        return {"plan_id": plan_id, "synced": synced, "count": len(synced), "message": "旅行路线已同步到共享日程"}
+
+
+@app.get("/api/travel-plans/{plan_id}/report")
+def travel_plan_report(plan_id: int, user: sqlite3.Row = Depends(current_user)) -> dict:
+    with db() as connection:
+        plan = travel_membership(connection, plan_id, user["id"])
+        days = [travel_day_json(connection, row) for row in connection.execute("SELECT * FROM travel_days WHERE plan_id = ? ORDER BY travel_date", (plan_id,)).fetchall()]
+        checks = travel_publish_checks(connection, plan)
+        return {"plan": {"id": plan_id, "name": plan["name"], "destination": plan["destination"], "status": plan["status"]}, "days": days, "summary": {"total_distance_km": round(sum(day["total_distance_km"] for day in days), 2), "total_duration_min": sum(day["total_duration_min"] for day in days), "estimated_budget_cents": checks["total_budget_cents"], "place_count": connection.execute("SELECT COUNT(*) FROM travel_places WHERE plan_id = ?", (plan_id,)).fetchone()[0]}, "checks": checks}
 
 
 initialize_database()
